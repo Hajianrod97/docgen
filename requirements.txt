@@ -2,6 +2,7 @@ chromadb>=1.0
 anthropic>=0.40
 fastapi>=0.110
 uvicorn>=0.30
+pathspec>=0.12  # .gitignore / .docgenignore matching
 
 # dev
 pytest>=8.0

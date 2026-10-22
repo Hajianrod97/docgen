@@ -79,6 +79,15 @@ def test_scan_relative_and_absolute_paths_agree(client, repo, monkeypatch):
     assert len(rel["chunks"]) == 9
 
 
+def test_scan_reports_files_by_language_and_skips(client):
+    multilang = EXAMPLE.parent / "example_multilang"
+    files = client.get("/api/scan", params={"repo": str(multilang)}).json()["files"]
+    assert files["languages"]["typescript"] == 3
+    assert files["languages"]["python"] == 2
+    assert files["count"] == sum(files["languages"].values())
+    assert files["skipped"] == [{"path": "frontend/package-lock.json", "reason": "lockfile"}]
+
+
 def test_scan_rejects_a_missing_path(client):
     result = client.get("/api/scan", params={"repo": "/definitely/not/a/real/path"})
     assert result.status_code == 400

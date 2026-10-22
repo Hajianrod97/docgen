@@ -1,0 +1,2 @@
+# Example of docgen-only exclusions (gitignore syntax).
+*.local.md

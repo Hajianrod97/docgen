@@ -10,11 +10,14 @@ AI-powered documentation generator. Point it at a repo, and it documents your co
 - [x] Phase 4: Retrieval-augmented generation (Claude API)
 - [x] Phase 5: Write output (docstrings + API.md + OVERVIEW.md)
 - [x] Phase 6a: Local web UI (the way to run docgen)
-- [ ] Phase 6b: Multi-language support (tree-sitter), incremental re-indexing, GitHub Action
+
+Next: a documentation hub for whole repos in any language (file, directory and repo summaries), then an "Ask the repo" Q&A feature built on RAG.
+
+- [x] Hub phase 1: repo walker for every language, with `.gitignore` / `.docgenignore` and skip rules
 
 ## Usage
 
-Requires Python 3.10+. Run all commands from this folder.
+Requires Python 3.10+. Run all commands from this folder. On macOS the system `python3` may be older (3.9); use a newer one explicitly, for example Homebrew's `python3.12 -m venv .venv`.
 
 ```bash
 python -m venv .venv
@@ -89,6 +92,19 @@ Safety checks, since this step edits your code:
 
 Run it on a git repo so you can review and undo with `git diff` / `git checkout`.
 
+## Which files are read
+
+docgen walks the whole repo and reads every text file, in any language, except:
+
+- Anything matched by `.gitignore`, or by a `.docgenignore` (same syntax, for things you want in git but not in the docs). Both are honored in subdirectories too, as in git.
+- `node_modules`, `.venv`, `venv`, `dist`, `build`, `.git`, `.docgen` and cache folders, even without a `.gitignore`.
+- Lockfiles (`package-lock.json`, `poetry.lock`, `*.lock`, ...), minified files (`*.min.*`) and source maps.
+- Binaries, files that aren't UTF-8, files over 200 KB, and symlinks (never followed).
+
+**Scan** lists how many files were read per language and, under *skipped*, every file left out by the last two rules with the reason. Files matched by ignore rules are left out without being listed.
+
+Docstring generation still works on Python files only; the other languages are for the upcoming hub. `example_multilang` is a small Python + TypeScript sample for trying this.
+
 ## How retrieval works
 
 For a target chunk, context comes from three sources:
@@ -104,7 +120,7 @@ For a target chunk, context comes from three sources:
 - Docstring line length is not adjusted; run your formatter (black, ruff) after applying if you enforce one.
 - Neither model client has been run against the real service by the author of this scaffold (no API key and no Ollama install were available); both are tested against fakes that follow the documented protocols. The web UI's own logic (routes, path handling, error responses) was hand-tested end to end against a real local Ollama install and a real browser during development, in addition to its automated tests; only the two model clients underneath it remain untested against the real services. Generate two or three chunks first and read the output before generating at scale.
 - Generated docs describe only what the retrieved context shows. If the call-graph match misses a dependency, the doc may describe it vaguely; click the chunk in the web UI to see the context it got when a doc looks thin.
-- Python only (`ast`). Multi-language support is Phase 6.
+- Docstring generation is Python only (`ast`). Other languages are scanned but not yet documented.
 - Call matching is by bare name. `obj.get()` on a plain dict can match a repo function named `get`, and a call resolved to another file can collide if two files define the same name.
 - The index is rebuilt from scratch every time you click Build index.
 - `DOCGEN_EMBEDDINGS=hash` selects an offline test embedder that matches on shared words, not meaning. Leave it unset to use the real model (downloaded on first run).

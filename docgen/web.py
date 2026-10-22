@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 import webbrowser
+from collections import Counter
 from pathlib import Path
 from threading import Timer
 
@@ -41,6 +42,7 @@ from docgen.indexer import build_index, ensure_unique_ids, index_path, open_coll
 from docgen.models import Chunk
 from docgen.parser import parse_repo
 from docgen.retriever import ContextItem, get_context
+from docgen.walker import walk_repo
 from docgen.writer import ApplyPlan, diff_lines, plan_apply, write_plan
 
 app = FastAPI(title="docgen")
@@ -128,9 +130,15 @@ def scan(repo: str):
     chunks = parse_repo(path)
     ensure_unique_ids(chunks)
     generated = load_generated(path)
+    walked = walk_repo(path)
     return {
         "chunks": [_chunk_dict(c, generated) for c in chunks],
         "indexed": index_path(path).exists(),
+        "files": {
+            "count": len(walked.files),
+            "languages": dict(Counter(f.language for f in walked.files).most_common()),
+            "skipped": [{"path": p, "reason": r} for p, r in walked.skipped],
+        },
     }
 
 

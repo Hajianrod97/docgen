@@ -158,6 +158,7 @@
       </div>
     </div>
     <div class="status" id="repoStatus"></div>
+    <div class="hint" id="fileSummary"></div>
   </div>
 
   <div class="card">
@@ -287,10 +288,21 @@ async function doScan() {
     currentChunks = data.chunks;
     status.textContent = `Found ${data.chunks.length} chunks.` + (data.indexed ? '' : ' No index yet \u2014 click "Build index" before generating.');
     status.className = 'status ok';
+    renderFileSummary(data.files);
     renderChunks();
   } catch (e) {
     status.textContent = e.message; status.className = 'status error';
   }
+}
+
+function renderFileSummary(files) {
+  const langs = Object.entries(files.languages).map(([l, n]) => `${esc(l)} ${n}`).join(', ');
+  let html = `${files.count} files read (${langs || 'none'}).`;
+  if (files.skipped.length) {
+    const rows = files.skipped.map(s => `<li><code>${esc(s.path)}</code> \u2014 ${esc(s.reason)}</li>`).join('');
+    html += ` <details style="display:inline"><summary>${files.skipped.length} skipped</summary><ul>${rows}</ul></details>`;
+  }
+  $('fileSummary').innerHTML = html;
 }
 
 async function doIndex() {

@@ -1,8 +1,8 @@
-"""Walks a Python repo and extracts documentable chunks via the ast module.
+"""Extracts documentable chunks from a repo's Python files via the ast module.
 
-v1 scope: Python only. Detects plain functions, class methods, classes, and
-Flask/FastAPI-style route decorators as API endpoints. Language support
-(JS/TS via tree-sitter) is a Phase 6 extension point — see README.
+Which files get read is decided by docgen.walker. Detects plain functions,
+class methods, classes, and Flask/FastAPI-style route decorators as API
+endpoints. Other languages are read as whole files by the hub instead.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import ast
 from pathlib import Path
 
 from docgen.models import Chunk, ChunkType
+from docgen.walker import walk_repo
 
 # Decorator name fragments that mark a function as an HTTP route.
 # Matched loosely (substring) so both `@app.route` and `@router.get` work.
@@ -22,21 +23,6 @@ ROUTE_DECORATOR_HINTS = {
     "patch": "PATCH",
     "delete": "DELETE",
 }
-
-DEFAULT_IGNORE_DIRS = {
-    ".git", "__pycache__", "node_modules", "venv", ".venv",
-    "dist", "build", ".mypy_cache", ".pytest_cache",
-}
-
-
-def find_python_files(repo_path: Path) -> list[Path]:
-    """Recursively collect .py files, skipping common noise directories."""
-    files = []
-    for path in repo_path.rglob("*.py"):
-        if any(part in DEFAULT_IGNORE_DIRS for part in path.parts):
-            continue
-        files.append(path)
-    return files
 
 
 def _decorator_name(dec: ast.expr) -> str:
@@ -183,9 +169,14 @@ def parse_file(file_path: Path, repo_root: Path) -> list[Chunk]:
 
 
 def parse_repo(repo_path: str | Path) -> list[Chunk]:
-    """Parse every Python file in a repo into a flat list of Chunks."""
+    """Parse every Python file in a repo into a flat list of Chunks.
+
+    Files come from the walker, so .gitignore, .docgenignore and the size and
+    binary checks apply here too.
+    """
     repo_root = Path(repo_path).resolve()
     all_chunks: list[Chunk] = []
-    for file_path in find_python_files(repo_root):
-        all_chunks.extend(parse_file(file_path, repo_root))
+    for f in walk_repo(repo_root).files:
+        if f.path.endswith(".py"):
+            all_chunks.extend(parse_file(f.abs_path, repo_root))
     return all_chunks
