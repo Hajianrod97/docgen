@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -26,7 +27,10 @@ from docgen.retriever import ContextItem, RetrievedContext
 
 Completer = Callable[[str, str], str]
 
-DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_MODEL = "claude-haiku-5-5"
+# Current Claude models think before answering, and that thinking counts
+# toward max_tokens, so leave plenty of room or replies get cut off.
+ANTHROPIC_MAX_TOKENS = 16000
 DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b"
 OLLAMA_URL = "http://localhost:11434"
 # Ollama's default context window is small and it truncates silently, which
@@ -273,19 +277,60 @@ def generate_for_chunk(chunk: Chunk, ctx: RetrievedContext, complete: Completer)
     return parse_output(output_kind(chunk), complete(system, user))
 
 
-def make_anthropic_completer(model: str = DEFAULT_MODEL, max_tokens: int = 1024) -> Completer:
-    """Build a completer backed by the Anthropic API (reads ANTHROPIC_API_KEY)."""
+class UsageMeter:
+    """Thread-safe running total of tokens used, as reported by the API."""
+
+    def __init__(self) -> None:
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self._lock = threading.Lock()
+
+    def add(self, input_tokens: int, output_tokens: int) -> None:
+        with self._lock:
+            self.input_tokens += input_tokens
+            self.output_tokens += output_tokens
+
+
+def make_anthropic_completer(
+    model: str = DEFAULT_MODEL,
+    api_key: str | None = None,
+    max_tokens: int = ANTHROPIC_MAX_TOKENS,
+    effort: str | None = None,
+    meter: UsageMeter | None = None,
+) -> Completer:
+    """Build a completer backed by the Anthropic API.
+
+    Uses `api_key` if given, else the SDK's usual credential lookup
+    (ANTHROPIC_API_KEY and friends). `effort` ("low", "medium", "high", ...)
+    trades thoroughness for cost; None keeps the model's default. Token usage
+    is added to `meter` when one is given.
+    """
     import anthropic
 
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+    extra = {"output_config": {"effort": effort}} if effort else {}
 
     def complete(system: str, user: str) -> str:
-        response = client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-        )
+        try:
+            response = client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+                **extra,
+            )
+        except anthropic.AuthenticationError as e:
+            raise ProviderSetupError("Authentication failed. Check the API key.") from e
+        except anthropic.NotFoundError as e:
+            raise ProviderSetupError(f"Unknown Claude model {model!r}.") from e
+        except anthropic.APIError as e:
+            raise ProviderError(str(e)) from e
+        if meter:
+            meter.add(response.usage.input_tokens, response.usage.output_tokens)
+        if response.stop_reason == "refusal":
+            raise ProviderError("The model declined to answer this request.")
+        if response.stop_reason == "max_tokens":
+            raise ProviderError(f"The reply hit the {max_tokens}-token limit and was cut off.")
         return "".join(b.text for b in response.content if b.type == "text")
 
     return complete

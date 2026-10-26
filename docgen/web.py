@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from docgen.generator import (
+    DEFAULT_MODEL,
     GenerationError,
     ProviderError,
     ProviderSetupError,
@@ -94,25 +95,8 @@ def _get_completer(provider: str, model: str | None, api_key: str | None):
     if provider == "anthropic":
         if not api_key:
             raise HTTPException(400, "Anthropic provider needs an API key.")
-        import anthropic
-
-        client = anthropic.Anthropic(api_key=api_key)
-
-        def complete(system: str, user: str) -> str:
-            try:
-                resp = client.messages.create(
-                    model=model or "claude-haiku-4-5-20251001",
-                    max_tokens=1024,
-                    system=system,
-                    messages=[{"role": "user", "content": user}],
-                )
-                return "".join(b.text for b in resp.content if b.type == "text")
-            except anthropic.AuthenticationError as e:
-                raise ProviderSetupError("Authentication failed. Check the API key.") from e
-            except anthropic.APIError as e:
-                raise ProviderError(str(e)) from e
-
-        return complete, (model or "claude-haiku-4-5-20251001")
+        m = model or DEFAULT_MODEL
+        return make_anthropic_completer(m, api_key=api_key), m
     elif provider == "ollama":
         from docgen.generator import DEFAULT_OLLAMA_MODEL
 

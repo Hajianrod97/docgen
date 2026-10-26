@@ -14,6 +14,7 @@ AI-powered documentation generator. Point it at a repo, and it documents your co
 Next: a documentation hub for whole repos in any language (file, directory and repo summaries), then an "Ask the repo" Q&A feature built on RAG.
 
 - [x] Hub phase 1: repo walker for every language, with `.gitignore` / `.docgenignore` and skip rules
+- [x] Hub phase 2: bottom-up summaries (files, directories, overview + diagram) with a cache, from the command line
 
 ## Usage
 
@@ -41,7 +42,7 @@ The overview is generated from a repo-wide map of signatures and routes, not ful
 
 - Endpoint docs are tidied after generation: a section the model can't support (for example `Errors: None`) is removed rather than left in as a claim that nothing can fail, and section names get the blank line Markdown needs.
 
-Generated docs are saved to `path/to/repo/.docgen/generated.json` for review; nothing in your source files changes until you click **Apply changes**. Re-running skips chunks whose source hasn't changed, so you only pay for new or edited code. Tick *regenerate existing* to redo everything, and use the *Model* box to pick a different Claude model (default: `claude-haiku-4-5-20251001`, chosen for cost across many chunks).
+Generated docs are saved to `path/to/repo/.docgen/generated.json` for review; nothing in your source files changes until you click **Apply changes**. Re-running skips chunks whose source hasn't changed, so you only pay for new or edited code. Tick *regenerate existing* to redo everything, and use the *Model* box to pick a different Claude model (default: `claude-haiku-5-5`, chosen for cost across many chunks).
 
 Try it on the included sample: `example_repo`.
 
@@ -91,6 +92,30 @@ Safety checks, since this step edits your code:
 4. **Formatting is preserved:** Windows (CRLF) line endings stay as they are, decorators stay attached to their functions, and awkward text (backslashes, triple quotes) is escaped so it reads back exactly.
 
 Run it on a git repo so you can review and undo with `git diff` / `git checkout`.
+
+## Building the hub (command line for now)
+
+The hub explains a whole repo in any language, bottom-up:
+
+1. **Files.** Each file gets a summary (purpose, key components, dependencies, what uses it). Its context is the repo files it imports, the files that import it, and its folder neighbors; imports are found for Python and JavaScript/TypeScript. Files too long for one prompt are summarized in overlapping sections, then merged. Files under 30 lines get no call of their own; their text goes into their directory's prompt.
+2. **Directories**, deepest first, from their files' and subdirectories' one-line purposes.
+3. **Overview**: what the repo does, stack, architecture, entry points, data flow, business rules, how to run, plus a Mermaid diagram. A diagram that fails a basic syntax check gets one repair attempt, and is left out (with a note) if that fails too.
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+python -m docgen.hub path/to/repo                      # Claude: claude-haiku-5-5 for files, claude-opus-5-5 above
+python -m docgen.hub path/to/repo --provider ollama    # local and free, one call at a time
+```
+
+It prints the number of model calls and a rough cost estimate (leaning high, since the models' thinking can't be predicted) and asks before spending anything; at the end it prints what was actually spent, from the API's token counts. Use `--file-model` / `--top-model` to pick models, `--yes` to skip the question, and `--regenerate` to redo everything.
+
+Results go to `path/to/repo/.docgen/hub.json`. Each summary is saved as soon as it's done, under a key built from what it was made from, so:
+
+- Running again only redoes files whose text changed, plus the directories above them and the overview.
+- Ctrl+C keeps everything finished so far; run again to continue.
+- A reply in the wrong format is recorded under `errors` and retried on the next run; a setup problem (bad key, unknown model, Ollama not running) stops the run.
+
+A Hub tab in the web UI, Markdown export and GitHub URLs come next.
 
 ## Which files are read
 
