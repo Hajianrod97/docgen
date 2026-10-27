@@ -6,7 +6,8 @@ here, so the skip rules live in one place:
 - `.gitignore` and `.docgenignore` patterns, including ones in subdirectories
   (gitignore syntax; a deeper file overrides a shallower one, as in git).
 - A fixed set of noise directories, skipped even without a .gitignore, since a
-  downloaded or non-git folder can still contain node_modules or a venv.
+  downloaded or non-git folder can still contain node_modules or a venv, plus
+  docs/hub, where the hub writes its own Markdown export.
 - Lockfiles, minified bundles and source maps: large, generated, and useless
   to summarize.
 - Symlinks (never followed, so a walk can't leave the repo), binaries, files
@@ -31,6 +32,10 @@ ALWAYS_SKIP_DIRS = {
     ".git", ".docgen", "__pycache__", "node_modules", "venv", ".venv",
     "dist", "build", ".mypy_cache", ".pytest_cache",
 }
+
+# Paths (relative to the repo root) skipped in every repo: the hub's own
+# Markdown export, so a rebuild never summarizes the previous build's output.
+ALWAYS_SKIP_PATHS = {"docs/hub"}
 
 IGNORE_FILES = (".gitignore", ".docgenignore")
 
@@ -168,6 +173,7 @@ def walk_repo(repo_path: str | Path) -> WalkResult:
         dirnames[:] = sorted(
             d for d in dirnames
             if d not in ALWAYS_SKIP_DIRS
+            and rel(d) not in ALWAYS_SKIP_PATHS
             and not (dir_abs / d).is_symlink()
             and not _is_ignored(rel(d) + "/", specs)
         )

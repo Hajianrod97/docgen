@@ -15,6 +15,7 @@ Next: a documentation hub for whole repos in any language (file, directory and r
 
 - [x] Hub phase 1: repo walker for every language, with `.gitignore` / `.docgenignore` and skip rules
 - [x] Hub phase 2: bottom-up summaries (files, directories, overview + diagram) with a cache, from the command line
+- [x] Hub phase 3: Hub tab in the web UI, Markdown export, public GitHub URLs
 
 ## Usage
 
@@ -93,7 +94,7 @@ Safety checks, since this step edits your code:
 
 Run it on a git repo so you can review and undo with `git diff` / `git checkout`.
 
-## Building the hub (command line for now)
+## Building the hub
 
 The hub explains a whole repo in any language, bottom-up:
 
@@ -115,7 +116,19 @@ Results go to `path/to/repo/.docgen/hub.json`. Each summary is saved as soon as 
 - Ctrl+C keeps everything finished so far; run again to continue.
 - A reply in the wrong format is recorded under `errors` and retried on the next run; a setup problem (bad key, unknown model, Ollama not running) stops the run.
 
-A Hub tab in the web UI, Markdown export and GitHub URLs come next.
+### In the web UI
+
+Start `python -m docgen.web`, enter a path or a public GitHub URL, and click Scan. The **Hub** tab shows the repo as a tree, with a dot per file and folder: green is summarized, yellow means the code changed since, red means the last attempt failed, and hollow is a small file covered by its folder's summary. Click anything to read its summary; the root shows the overview and the diagram's Mermaid source (paste it into [mermaid.live](https://mermaid.live) to see it drawn).
+
+**Build hub** shows the call count and estimated cost and asks before starting. The build runs in the background with a progress bar and a **Stop** button; stopping lets the calls already sent finish, and keeps everything done so far. Leave the two model fields empty for the defaults.
+
+### GitHub repos
+
+A public `https://github.com/owner/repo` URL is shallow-cloned into `~/.cache/docgen/owner/repo` (or `$DOCGEN_CACHE_DIR`), and each Scan pulls the latest commit. The hub cache lives in the clone, so a rebuild after new commits only redoes what changed. If the pull fails (offline, say), the existing copy is used with a warning. The CLI takes URLs too.
+
+### Markdown export
+
+**Export Markdown** (or `--export` on the command line) writes one `README.md` per folder: the top one has the overview, the diagram as a `mermaid` code block (GitHub draws these) and the root folder; each folder's README has its role, a table of what's in it, how it fits together, and its files' summaries, with links to the source. A local repo exports to `docs/hub/`, which the walker always skips so the hub never summarizes its own output. A GitHub repo exports to `./output/owner-repo/`. Re-exporting removes READMEs it wrote earlier for folders that no longer exist, and nothing else.
 
 ## Which files are read
 

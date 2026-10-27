@@ -34,7 +34,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from docgen.generator import Completer, GenerationError, ProviderSetupError, UsageMeter
+from docgen.generator import (
+    DEFAULT_OLLAMA_MODEL,
+    Completer,
+    GenerationError,
+    ProviderSetupError,
+    UsageMeter,
+    make_anthropic_completer,
+    make_ollama_completer,
+)
 from docgen.imports import import_graph, reverse_graph
 from docgen.walker import RepoFile, walk_repo
 
@@ -45,6 +53,11 @@ SECTION_CHARS = 12_000  # about 3,000 tokens: fits Ollama's 8K window with room 
 SECTION_OVERLAP_LINES = 10
 TINY_FILE_CHARS = 1_500  # a tiny file's text is cut to this in its directory's prompt
 ROOT = ""  # the repo root's key in the directory map
+
+# Default models: a cheap one for the many file summaries, a stronger one for
+# the few directory summaries and the overview. Ollama uses one model for both.
+HUB_FILE_MODEL = "claude-haiku-5-5"
+HUB_TOP_MODEL = "claude-opus-5-5"
 
 # Rough token counts used only for the cost estimate. Replies include the
 # model's thinking, which can't be known in advance, so these lean high.
@@ -243,6 +256,43 @@ class HubPlan:
             "cached_files": sum(1 for p in self.files if not self.is_tiny(p)) - len(self.todo_files),
             "tiny_files": sum(1 for p in self.files if self.is_tiny(p)),
         }
+
+
+def default_models(provider: str) -> tuple[str, str]:
+    """(file model, top model) used when the user doesn't pick one."""
+    if provider == "anthropic":
+        return HUB_FILE_MODEL, HUB_TOP_MODEL
+    if provider == "ollama":
+        return DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_MODEL
+    raise ValueError(f"Unknown provider: {provider}")
+
+
+def make_hub_models(
+    provider: str,
+    file_model: str | None = None,
+    top_model: str | None = None,
+    api_key: str | None = None,
+) -> HubModels:
+    """The completers for a build. For Anthropic, `api_key` falls back to the
+    SDK's usual lookup (ANTHROPIC_API_KEY) when not given."""
+    default_file, default_top = default_models(provider)
+    if provider == "anthropic":
+        file_model = file_model or default_file
+        top_model = top_model or default_top
+        file_meter, top_meter = UsageMeter(), UsageMeter()
+        return HubModels(
+            make_anthropic_completer(file_model, api_key=api_key, effort="low", meter=file_meter), file_model,
+            make_anthropic_completer(top_model, api_key=api_key, effort="medium", meter=top_meter), top_model,
+            file_meter=file_meter, top_meter=top_meter,
+        )
+    file_model = file_model or default_file
+    top_model = top_model or file_model
+    # A local model runs one request at a time and has a much smaller context window.
+    return HubModels(
+        make_ollama_completer(file_model), file_model,
+        make_ollama_completer(top_model, max_tokens=2048), top_model,
+        workers=1, context_chars=20_000,
+    )
 
 
 def _cost(model: str, input_tokens: int, output_tokens: int) -> float | None:
@@ -528,6 +578,46 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
+# ------------------------------------------------------------------ status
+
+
+def _status(entry: dict | None, key: str, error: str | None) -> str:
+    if entry and entry.get("key") == key:
+        return "done"
+    if error:
+        return "error"
+    return "stale" if entry else "missing"
+
+
+def overview_status(plan: HubPlan, hub: dict) -> str:
+    return _status(hub["overview"], plan.overview_key, hub["errors"].get("overview:overview"))
+
+
+def hub_tree(plan: HubPlan, hub: dict) -> dict:
+    """The repo as a nested tree, each node with the state of its summary:
+    done, stale (the code changed since), missing, error, or tiny (a small
+    file described in its directory's summary instead of its own)."""
+
+    def file_node(p: str) -> dict:
+        if plan.is_tiny(p):
+            status = "tiny"
+        else:
+            status = _status(hub["files"].get(p), plan.file_keys[p], hub["errors"].get(f"file:{p}"))
+        f = plan.files[p]
+        return {"kind": "file", "path": p, "name": posixpath.basename(p),
+                "language": f.language, "lines": f.lines, "status": status}
+
+    def dir_node(d: str) -> dict:
+        info = plan.dirs[d]
+        return {
+            "kind": "dir", "path": d, "name": posixpath.basename(d),
+            "status": _status(hub["dirs"].get(d), plan.dir_keys[d], hub["errors"].get(f"dir:{d}")),
+            "children": [dir_node(s) for s in sorted(info.subdirs)] + [file_node(f) for f in sorted(info.files)],
+        }
+
+    return dir_node(ROOT)
+
+
 # ------------------------------------------------------------------- build
 
 
@@ -716,42 +806,35 @@ def build_hub(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Build a hub from the command line (the web UI gets a Hub tab next)."""
+    """Build a hub from the command line (the web UI's Hub tab does the same)."""
     import argparse
 
-    from docgen.generator import (
-        DEFAULT_OLLAMA_MODEL, ProviderError, make_anthropic_completer, make_ollama_completer,
-    )
+    from docgen.generator import ProviderError
+    from docgen.hub_export import default_export_dir, export_hub
+    from docgen.repos import RepoError, resolve_repo
 
     parser = argparse.ArgumentParser(prog="python -m docgen.hub", description=__doc__.splitlines()[0])
-    parser.add_argument("repo")
+    parser.add_argument("repo", help="a local path or a public GitHub URL")
     parser.add_argument("--provider", choices=["anthropic", "ollama"], default="anthropic")
     parser.add_argument("--file-model", help="model for file summaries")
     parser.add_argument("--top-model", help="model for directories and the overview")
     parser.add_argument("--regenerate", action="store_true", help="ignore cached summaries")
     parser.add_argument("--yes", action="store_true", help="skip the cost confirmation")
+    parser.add_argument("--export", action="store_true", help="write the hub as Markdown afterwards")
     args = parser.parse_args(argv)
 
-    if args.provider == "anthropic":
-        file_model = args.file_model or "claude-haiku-5-5"
-        top_model = args.top_model or "claude-opus-5-5"
-        file_meter, top_meter = UsageMeter(), UsageMeter()
-        models = HubModels(
-            make_anthropic_completer(file_model, effort="low", meter=file_meter), file_model,
-            make_anthropic_completer(top_model, effort="medium", meter=top_meter), top_model,
-            file_meter=file_meter, top_meter=top_meter,
-        )
-    else:
-        file_model = args.file_model or DEFAULT_OLLAMA_MODEL
-        top_model = args.top_model or file_model
-        models = HubModels(
-            make_ollama_completer(file_model), file_model,
-            make_ollama_completer(top_model, max_tokens=2048), top_model,
-            workers=1, context_chars=20_000,
-        )
+    try:
+        source = resolve_repo(args.repo, fetch=True)
+    except RepoError as e:
+        print(e)
+        return 1
+    if source.warning:
+        print(source.warning)
+    repo = source.path
 
-    plan = plan_hub(args.repo, regenerate=args.regenerate)
-    est = plan.estimate(file_model, top_model)
+    models = make_hub_models(args.provider, args.file_model, args.top_model)
+    plan = plan_hub(repo, regenerate=args.regenerate)
+    est = plan.estimate(models.file_model, models.top_model)
     cost = "unknown (model not in price list)" if est["cost_usd"] is None else f"about ${est['cost_usd']:.2f}"
     print(f"{len(plan.files)} files: {len(plan.todo_files)} to summarize, "
           f"{est['cached_files']} cached, {est['tiny_files']} tiny (covered by their directory).")
@@ -759,26 +842,31 @@ def main(argv: list[str] | None = None) -> int:
           f"~{est['output_tokens']:,} output tokens, {cost}.")
     if est["total_calls"] == 0:
         print("Everything is up to date.")
-        return 0
-    if not args.yes and input("Continue? [y/N] ").strip().lower() != "y":
+        hub = load_hub(repo)
+    elif not args.yes and input("Continue? [y/N] ").strip().lower() != "y":
         return 1
+    else:
+        def progress(e: dict) -> None:
+            if e.get("item") is not None:
+                status = f"FAILED: {e['error']}" if e.get("error") else "ok"
+                print(f"[{e['done']}/{e['total']}] {e['stage']} {e['item'] or '(root)'}: {status}")
 
-    def progress(e: dict) -> None:
-        if e.get("item"):
-            status = f"FAILED: {e['error']}" if e.get("error") else "ok"
-            print(f"[{e['done']}/{e['total']}] {e['stage']} {e['item'] or '(root)'}: {status}")
+        try:
+            hub = build_hub(repo, models, plan, on_progress=progress, regenerate=args.regenerate)
+        except KeyboardInterrupt:
+            print("Stopped. Finished summaries are saved; run again to continue.")
+            return 1
+        except ProviderError as e:
+            print(f"Stopped: {e}")
+            return 1
+        spent = models.cost_so_far()
+        print(f"Saved to {hub_path(repo)} ({len(hub['errors'])} errors"
+              + (f", ${spent:.4f} spent" if spent else "") + ").")
 
-    try:
-        hub = build_hub(args.repo, models, plan, on_progress=progress, regenerate=args.regenerate)
-    except KeyboardInterrupt:
-        print("Stopped. Finished summaries are saved; run again to continue.")
-        return 1
-    except ProviderError as e:
-        print(f"Stopped: {e}")
-        return 1
-    spent = models.cost_so_far()
-    print(f"Saved to {hub_path(args.repo)} ({len(hub['errors'])} errors"
-          + (f", ${spent:.4f} spent" if spent else "") + ").")
+    if args.export:
+        out_dir = default_export_dir(source)
+        written = export_hub(plan, hub, out_dir, source)
+        print(f"Wrote {len(written)} Markdown files to {out_dir}")
     return 0
 
 
