@@ -4,13 +4,13 @@ import json
 import shutil
 
 import pytest
+from test_hub import MULTILANG
 
 from docgen import evaluate as evalmod
 from docgen.evaluate import evaluate
 from docgen.llm import GenerationError
 from docgen.repo_index import update_index
 from docgen.rewrite import build_prompt, parse_terms, rewrite_query
-from test_hub import MULTILANG
 
 
 @pytest.fixture(autouse=True)

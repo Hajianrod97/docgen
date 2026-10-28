@@ -21,9 +21,9 @@ from __future__ import annotations
 import hashlib
 import json
 import posixpath
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 import chromadb
 
@@ -380,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.query:
         result = open_repo_collection(source.path).query(query_texts=[args.query], n_results=args.k)
-        for doc_id, meta, dist in zip(result["ids"][0], result["metadatas"][0], result["distances"][0]):
+        for doc_id, meta, dist in zip(result["ids"][0], result["metadatas"][0], result["distances"][0], strict=True):
             print(f"{1 - dist:.3f}  {doc_id}  [{meta['type']}]")
     return 0
 

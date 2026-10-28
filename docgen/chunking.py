@@ -209,7 +209,7 @@ class _Source:
     line_starts: list[int]
 
     @classmethod
-    def of(cls, data: bytes) -> "_Source":
+    def of(cls, data: bytes) -> _Source:
         starts = [0]
         starts += [i + 1 for i, b in enumerate(data) if b == 0x0A]
         return cls(data, starts)

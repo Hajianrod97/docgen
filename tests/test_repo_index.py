@@ -4,11 +4,11 @@ what gets stored and when, not how good the search is."""
 import shutil
 
 import pytest
+from test_hub import MULTILANG, FakeModel, models_for
 
 from docgen import repo_index
 from docgen.hub import build_hub
 from docgen.repo_index import index_status, load_manifest, open_repo_collection, update_index
-from test_hub import MULTILANG, FakeModel, models_for
 
 
 @pytest.fixture(autouse=True)
@@ -25,7 +25,7 @@ def repo(tmp_path):
 
 def entries(repo, **where):
     got = open_repo_collection(repo).get(where=where or None)
-    return dict(zip(got["ids"], got["metadatas"]))
+    return dict(zip(got["ids"], got["metadatas"], strict=True))
 
 
 def test_first_run_indexes_every_file(repo):

@@ -5,12 +5,12 @@ import json
 import re
 import shutil
 import threading
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
 
 from docgen import hub as hubmod
-from docgen.llm import GenerationError, ProviderError, ProviderSetupError
 from docgen.hub import (
     HubModels,
     HubStopped,
@@ -21,6 +21,7 @@ from docgen.hub import (
     split_sections,
 )
 from docgen.imports import import_graph, reverse_graph
+from docgen.llm import GenerationError, ProviderError, ProviderSetupError
 from docgen.walker import walk_repo
 
 MULTILANG = Path(__file__).resolve().parent.parent / "example_multilang"
@@ -218,7 +219,7 @@ def test_split_sections_overlaps_and_covers_everything():
     sections = split_sections(text)
     assert len(sections) > 1
     assert sections[0][0] == 1 and sections[-1][1] == 400
-    for (_, end, _), (start, _, _) in zip(sections, sections[1:]):
+    for (_, end, _), (start, _, _) in pairwise(sections):
         assert start == end - hubmod.SECTION_OVERLAP_LINES + 1
     assert all(len(t) <= hubmod.SECTION_CHARS for _, _, t in sections)
     assert split_sections("short\n") == [(1, 1, "short\n")]

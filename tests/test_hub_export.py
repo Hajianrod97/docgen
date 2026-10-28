@@ -4,11 +4,11 @@ import re
 import shutil
 
 import pytest
+from test_hub import MULTILANG, FakeModel, models_for
 
 from docgen.hub import build_hub, hub_tree, load_hub, plan_hub
 from docgen.hub_export import MARKER, default_export_dir, export_hub, shift_headings, slug
 from docgen.repos import RepoSource
-from test_hub import MULTILANG, FakeModel, models_for
 
 
 @pytest.fixture
@@ -121,7 +121,7 @@ def test_source_links_resolve_to_the_repo_files(built, tmp_path):
     out = tmp_path / "out"
     export(built, out)
     readme = out / "backend" / "README.md"
-    sources = [l for l in links(readme.read_text()) if l.endswith(".py")]
+    sources = [link for link in links(readme.read_text()) if link.endswith(".py")]
     assert sources
     for link in sources:
         assert (readme.parent / link).resolve().is_file()

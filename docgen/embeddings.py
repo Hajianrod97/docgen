@@ -66,7 +66,7 @@ class HashingEmbedding(EmbeddingFunction[Documents]):
         return {"dim": self.dim}
 
     @staticmethod
-    def build_from_config(config: dict) -> "HashingEmbedding":
+    def build_from_config(config: dict) -> HashingEmbedding:
         return HashingEmbedding(dim=config.get("dim", 384))
 
 
@@ -136,7 +136,7 @@ class OllamaEmbedding(EmbeddingFunction[Documents]):
         return {"model": self.model, "host": self.host}
 
     @staticmethod
-    def build_from_config(config: dict) -> "OllamaEmbedding":
+    def build_from_config(config: dict) -> OllamaEmbedding:
         return OllamaEmbedding(model=config.get("model", DEFAULT_OLLAMA_EMBED_MODEL), host=config.get("host"))
 
 

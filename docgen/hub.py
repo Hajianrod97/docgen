@@ -29,11 +29,12 @@ import json
 import posixpath
 import re
 import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
+from docgen.imports import import_graph, reverse_graph
 from docgen.llm import (
     DEFAULT_OLLAMA_MODEL,
     Completer,
@@ -43,7 +44,6 @@ from docgen.llm import (
     make_anthropic_completer,
     make_ollama_completer,
 )
-from docgen.imports import import_graph, reverse_graph
 from docgen.walker import RepoFile, walk_repo
 
 HUB_FILENAME = ".docgen/hub.json"
@@ -817,8 +817,8 @@ def main(argv: list[str] | None = None) -> int:
     """Build a hub from the command line (the web UI's Hub tab does the same)."""
     import argparse
 
-    from docgen.llm import ProviderError
     from docgen.hub_export import default_export_dir, export_hub
+    from docgen.llm import ProviderError
     from docgen.repos import RepoError, resolve_repo
 
     parser = argparse.ArgumentParser(prog="python -m docgen.hub", description=__doc__.splitlines()[0])

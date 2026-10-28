@@ -57,7 +57,7 @@ def _resolve_source(repo: str, fetch: bool = False) -> RepoSource:
     try:
         return resolve_repo(repo, fetch=fetch)
     except RepoError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
 
 
 def _resolve_repo(repo: str) -> Path:
@@ -105,7 +105,7 @@ def _hub_plan(path: Path, regenerate: bool = False):
     try:
         return plan_hub(path, regenerate=regenerate)
     except GenerationError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
 
 
 @app.get("/api/hub")
@@ -134,7 +134,7 @@ def _models_or_400(provider: str, file_model: str | None, top_model: str | None)
     try:
         default_file, default_top = default_models(provider)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     file_model = file_model or default_file
     top_model = top_model or (default_top if provider == "anthropic" else file_model)
     return file_model, top_model
@@ -263,7 +263,7 @@ def search_index(req: SearchIndexRequest):
     try:
         stats = update_index(path, rebuild=req.rebuild)
     except EmbeddingError as e:
-        raise HTTPException(502, str(e))
+        raise HTTPException(502, str(e)) from e
     return dict(dataclasses.asdict(stats), status=index_status(path))
 
 
@@ -312,13 +312,13 @@ def ask_endpoint(req: AskRequest):
     try:
         complete, model, meter = make_ask_completer(req.provider, req.model, req.api_key)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     try:
         update_index(path)
         answer = ask(path, req.question, complete, model, meter, k=max(1, min(req.k, 20)),
                      mode=req.mode, budget=CONTEXT_CHARS[req.provider])
     except (ProviderError, EmbeddingError) as e:
-        raise HTTPException(502, str(e))
+        raise HTTPException(502, str(e)) from e
     return {
         "answer": answer.text,
         "sources": [dataclasses.asdict(h) | {"citation": h.citation} for h in answer.sources],

@@ -7,11 +7,11 @@ import time
 
 import pytest
 from fastapi.testclient import TestClient
+from test_hub import MULTILANG, FakeModel, models_for
+from test_repos import fake_github  # noqa: F401  (fixture)
 
 from docgen import repos, web
 from docgen.llm import ProviderSetupError
-from test_hub import MULTILANG, FakeModel, models_for
-from test_repos import fake_github  # noqa: F401  (fixture)
 
 
 @pytest.fixture

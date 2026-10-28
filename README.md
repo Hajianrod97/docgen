@@ -13,15 +13,14 @@ Point it at a repo, in any language, and it explains it. It writes a documentati
 
 ## Usage
 
-Requires Python 3.10+. Run all commands from this folder. On macOS the system `python3` may be older (3.9); use a newer one explicitly, for example Homebrew's `python3.12 -m venv .venv`.
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/) (`brew install uv`, or see its install page). Run all commands from this folder.
 
 ```bash
-python -m venv .venv
-# activate: .venv\Scripts\activate (Windows)  or  source .venv/bin/activate (macOS/Linux)
-pip install -r requirements.txt
-
-python -m docgen.web
+uv sync                    # creates .venv with the exact versions in uv.lock
+uv run python -m docgen.web
 ```
+
+`uv run` keeps `.venv` in step with `uv.lock` before running anything. To use plain `python` instead, activate the environment first (`source .venv/bin/activate`, or `.venv/bin/activate.fish` in fish). Add a dependency with `uv add <package>` (or `uv add --dev <package>` for tests only), which updates `pyproject.toml` and `uv.lock` together.
 
 This opens `http://127.0.0.1:8765` in your browser. It runs only on your own machine (binds to 127.0.0.1, nothing public). Then:
 
@@ -187,10 +186,11 @@ docgen walks the whole repo and reads every text file, in any language, except:
 ## Tests
 
 ```bash
-python -m pytest tests -q
+uv run ruff check                              # lint
+DOCGEN_EMBEDDINGS=hash uv run pytest -q        # tests (fish: env DOCGEN_EMBEDDINGS=hash uv run pytest -q)
 ```
 
-The tests fake the models (including a small fake Ollama server), use the offline embedder, clone from a local git repo standing in for GitHub, and drive the web UI through FastAPI's TestClient, so everything runs offline and costs nothing.
+GitHub Actions runs both on every push to `main` (`.github/workflows/ci.yml`). The tests fake the models (including a small fake Ollama server), use the offline embedder, clone from a local git repo standing in for GitHub, and drive the web UI through FastAPI's TestClient, so everything runs offline and costs nothing.
 
 ## Look and feel
 

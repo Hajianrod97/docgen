@@ -8,13 +8,14 @@ import shutil
 from pathlib import Path
 
 import pytest
+from test_hub import MULTILANG, FakeModel, models_for
 
 from docgen import search as searchmod
-from docgen.evaluate import evaluate, load_eval, main as eval_main
+from docgen.evaluate import evaluate, load_eval
+from docgen.evaluate import main as eval_main
 from docgen.hub import build_hub
 from docgen.repo_index import update_index
 from docgen.search import BM25, rrf, search, tokenize
-from test_hub import MULTILANG, FakeModel, models_for
 
 ROOT = Path(__file__).resolve().parent.parent
 

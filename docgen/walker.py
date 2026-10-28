@@ -166,7 +166,7 @@ def walk_repo(repo_path: str | Path) -> WalkResult:
         specs = inherited + [(rel_dir, s) for s in _load_specs(dir_abs)]
         specs_for[rel_dir] = specs
 
-        def rel(name: str) -> str:
+        def rel(name: str, rel_dir: str = rel_dir) -> str:
             return f"{rel_dir}/{name}" if rel_dir else name
 
         # Prune in place so os.walk never descends into skipped directories.

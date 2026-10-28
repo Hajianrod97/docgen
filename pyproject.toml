@@ -1,0 +1,37 @@
+[project]
+name = "docgen"
+version = "0.1.0"
+description = "Documentation hub and question answering for any code repo"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "chromadb>=1.0",
+    "anthropic>=0.40",
+    "fastapi>=0.110",
+    "uvicorn>=0.30",
+    "pathspec>=0.12",  # .gitignore / .docgenignore matching
+    "tree-sitter-language-pack>=1.22",  # syntax-aware chunking for languages other than Python
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",  # needed by FastAPI's TestClient
+    "ruff>=0.8",
+]
+
+[tool.uv]
+package = false  # run from the checkout; nothing is built or published
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = ["example_multilang"]  # sample repo the tests read, not our code
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]  # pycodestyle, pyflakes, import order, bugbear, pyupgrade
+ignore = ["E501"]  # long lines are mostly prompt text, which reads better unwrapped

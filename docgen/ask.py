@@ -20,6 +20,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from docgen.hub import model_cost
 from docgen.llm import (
     DEFAULT_OLLAMA_MODEL,
     Completer,
@@ -27,7 +28,6 @@ from docgen.llm import (
     make_anthropic_completer,
     make_ollama_completer,
 )
-from docgen.hub import model_cost
 from docgen.search import SearchHit, search
 
 ASK_MODEL = "claude-sonnet-5-5"

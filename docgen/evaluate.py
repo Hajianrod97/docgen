@@ -31,10 +31,9 @@ Run: python -m docgen.evaluate evals/docgen.json [--k 5] [--mode hybrid] [--rewr
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-
-from typing import Callable
 
 from docgen.search import HYBRID_ALPHA, MODES, SearchHit, search
 
@@ -184,7 +183,11 @@ def _make_rewriter(repo: Path, provider: str, model: str | None):
     the eval."""
     from docgen.hub import model_cost
     from docgen.llm import (
-        DEFAULT_OLLAMA_MODEL, GenerationError, UsageMeter, make_anthropic_completer, make_ollama_completer,
+        DEFAULT_OLLAMA_MODEL,
+        GenerationError,
+        UsageMeter,
+        make_anthropic_completer,
+        make_ollama_completer,
     )
     from docgen.rewrite import REWRITE_MODEL, rewrite_query
 

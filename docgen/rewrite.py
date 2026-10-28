@@ -80,7 +80,7 @@ def rewrite_query(repo_path: str | Path, question: str, complete: Completer, mod
     """Search terms for a question, from the cache if this exact question was
     rewritten by this model before."""
     repo = Path(repo_path).resolve()
-    key = hashlib.sha1(f"{REWRITE_VERSION}\0{model}\0{question}".encode("utf-8")).hexdigest()
+    key = hashlib.sha1(f"{REWRITE_VERSION}\0{model}\0{question}".encode()).hexdigest()
     cache = _load_cache(repo)
     if key in cache:
         return cache[key]["terms"]

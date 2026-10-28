@@ -15,7 +15,7 @@ import os
 import threading
 import urllib.error
 import urllib.request
-from typing import Callable
+from collections.abc import Callable
 
 Completer = Callable[[str, str], str]
 

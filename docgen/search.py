@@ -82,7 +82,7 @@ class BM25:
 
     def scores(self, query: list[str]) -> list[float]:
         out = []
-        for counts, length in zip(self.counts, self.lengths):
+        for counts, length in zip(self.counts, self.lengths, strict=True):
             score = 0.0
             norm = self.k1 * (1 - self.b + self.b * length / (self.avg_length or 1))
             for term in set(query):
@@ -97,7 +97,7 @@ def rrf(rankings: list[list[str]], k: int = RRF_K,
         weights: list[float] | None = None) -> dict[str, float]:
     """Reciprocal rank fusion of several ranked id lists, each optionally weighted."""
     fused: dict[str, float] = {}
-    for ranking, weight in zip(rankings, weights or [1.0] * len(rankings)):
+    for ranking, weight in zip(rankings, weights or [1.0] * len(rankings), strict=True):
         for rank, doc_id in enumerate(ranking, 1):
             fused[doc_id] = fused.get(doc_id, 0.0) + weight / (k + rank)
     return fused
@@ -129,8 +129,8 @@ class _Corpus:
     def __init__(self, collection):
         got = collection.get(include=["documents", "metadatas"])
         self.ids = got["ids"]
-        self.documents = dict(zip(got["ids"], got["documents"]))
-        self.metadatas = dict(zip(got["ids"], got["metadatas"]))
+        self.documents = dict(zip(got["ids"], got["documents"], strict=True))
+        self.metadatas = dict(zip(got["ids"], got["metadatas"], strict=True))
         self.bm25 = BM25([tokenize(d) for d in got["documents"]])
 
 
