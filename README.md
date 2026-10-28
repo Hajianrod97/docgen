@@ -97,21 +97,26 @@ The embedding model is all-MiniLM-L6-v2, run locally by ChromaDB and downloaded 
 
 ### Measuring it
 
-`evals/docgen.json` has 20 questions about docgen's own code, each with the files that answer it. Run:
+There are two question sets: `evals/docgen.json`, 52 questions about docgen's own code, and `evals/gitsummarize.json`, 48 questions about [gitsummarize](https://github.com/antarixxx/gitsummarize), a Python backend with a TypeScript frontend. Each question lists the files that answer it and, more precisely, the chunks: a path plus a piece of text the right chunk contains, such as `docgen/hub.py :: def _tiny_description`. Run:
 
 ```bash
 python -m docgen.evaluate evals/docgen.json --misses
 ```
 
-It updates the index, runs every question through each search mode, and prints the hit rate (the share of questions where a right file is in the top k) and MRR (how high the first right file ranks). On docgen itself:
+It updates the index, runs every question through each search mode, and prints the hit rate (the share of questions where a right file is in the top k) and MRR (how high the first right file ranks), then the same two numbers for the right *chunk*. The file numbers are lenient: any chunk of an 880-line file counts, even one about something else. Tune settings on docgen and check them on gitsummarize, which keeps a change from being fitted to one repo.
 
-| mode | hit rate, top 5 | hit rate, top 3 | MRR, top 5 |
-|---|---|---|---|
-| hybrid | 95% | 85% | 0.66 |
-| vector | 95% | 80% | 0.59 |
-| keyword | 80% | 65% | 0.50 |
+Top 5, MiniLM embeddings, plain RRF:
 
-`evals/gitsummarize.json` has 18 questions about [gitsummarize](https://github.com/antarixxx/gitsummarize), mostly about its TypeScript frontend, for measuring chunking in languages other than Python. Switching TypeScript from 60-line windows to tree-sitter chunks changed it like this (top 5):
+| mode | docgen file | docgen chunk | gitsummarize file | gitsummarize chunk |
+|---|---|---|---|---|
+| hybrid | 96%, MRR 0.69 | 60%, MRR 0.39 | 88%, MRR 0.77 | 79%, MRR 0.61 |
+| vector | 88%, MRR 0.68 | 56%, MRR 0.34 | 79%, MRR 0.66 | 71%, MRR 0.48 |
+| keyword | 77%, MRR 0.53 | 42%, MRR 0.25 | 83%, MRR 0.70 | 81%, MRR 0.63 |
+| hybrid, query rewritten by qwen2.5-coder:7b | 87%, MRR 0.61 | 60%, MRR 0.32 | **96%**, MRR 0.76 | **85%**, MRR 0.65 |
+
+Search usually finds the right file but often not the right part of it, especially in docgen's long modules: that gap is what a reranker should close. Rewriting the question into likely identifiers with a local model helped on gitsummarize and hurt on docgen, so it isn't used by default. With 50 questions, one question is worth 2 points.
+
+The rest of this section was measured on the first, smaller question sets (20 and 18 questions, files only). Switching TypeScript from 60-line windows to tree-sitter chunks changed gitsummarize like this (top 5):
 
 | mode | windows | tree-sitter |
 |---|---|---|

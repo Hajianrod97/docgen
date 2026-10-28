@@ -11,7 +11,7 @@ import pytest
 from test_hub import MULTILANG, FakeModel, models_for
 
 from docgen import search as searchmod
-from docgen.evaluate import evaluate, load_eval
+from docgen.evaluate import evaluate, load_eval, parse_chunk_label
 from docgen.evaluate import main as eval_main
 from docgen.hub import build_hub
 from docgen.repo_index import update_index
@@ -155,20 +155,55 @@ def test_load_eval_resolves_the_repo_against_the_eval_file(tmp_path):
     assert load_eval(f)[0] == "https://github.com/o/r"
 
 
+def test_evaluate_grades_chunks_as_well_as_files(repo):
+    questions = [
+        {"question": "TaskStore add task", "files": ["backend/store.py"],
+         "chunks": ["backend/store.py :: def add"]},
+        {"question": "TaskStore add task", "files": ["backend/store.py"],
+         "chunks": ["backend/store.py :: text that is in no chunk"]},
+        {"question": "TaskStore add task", "files": ["backend/store.py"]},  # no chunk label
+    ]
+    result = evaluate(repo, questions, k=3, mode="hybrid")
+    assert [q.rank for q in result.questions] == [1, 1, 1]
+    assert result.questions[0].chunk_rank is not None
+    assert result.questions[1].chunk_rank is None  # right file, wrong chunk
+    assert len(result.labelled) == 2 and result.chunk_hit_rate == 0.5
+
+
+def test_chunk_labels_need_a_path_and_text():
+    assert parse_chunk_label("a/b.py :: def f(x)") == ("a/b.py", "def f(x)")
+    for bad in ("a/b.py", "a/b.py ::", " :: def f"):
+        with pytest.raises(ValueError):
+            parse_chunk_label(bad)
+
+
 def test_eval_command_prints_a_table(repo, tmp_path, capsys):
     f = write_eval(tmp_path / "q.json", repo, [{"question": "TaskStore", "files": ["backend/store.py"]}])
     assert eval_main([str(f), "--k", "3"]) == 0
     out = capsys.readouterr().out
     assert "hybrid" in out and "vector" in out and "keyword" in out and "100%" in out
+    assert "chunk" not in out  # no chunk labels, no chunk columns
+
+
+def test_eval_command_adds_chunk_columns(repo, tmp_path, capsys):
+    f = write_eval(tmp_path / "q.json", repo, [
+        {"question": "TaskStore", "files": ["backend/store.py"], "chunks": ["backend/store.py :: class TaskStore"]},
+    ])
+    assert eval_main([str(f), "--k", "3", "--mode", "hybrid"]) == 0
+    assert "chunk hit" in capsys.readouterr().out
 
 
 def test_docgen_eval_set_is_well_formed():
     repo, questions = load_eval(ROOT / "evals" / "docgen.json")
-    assert Path(repo) == ROOT and len(questions) >= 20
+    assert Path(repo) == ROOT and len(questions) >= 50
     for q in questions:
         assert q["question"].strip() and q["files"]
         for f in q["files"]:
             assert (ROOT / f).is_file(), f
+        for label in q.get("chunks", []):
+            path, text = parse_chunk_label(label)
+            assert path in q["files"], label
+            assert text in (ROOT / path).read_text(encoding="utf-8"), label
 
 
 def test_web_search_endpoint(repo):

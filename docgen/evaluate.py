@@ -3,7 +3,8 @@
 An eval file is JSON:
 
     {"repo": "..",   # relative to the eval file, or absolute, or a GitHub URL
-     "questions": [{"question": "...", "files": ["path/that/answers/it.py"]}]}
+     "questions": [{"question": "...", "files": ["path/that/answers/it.py"],
+                    "chunks": ["path/that/answers/it.py :: def the_answer"]}]}
 
 For each question and search mode, a question is a *hit* if any of its files
 appears among the top k results (a code chunk of the file, or the file's hub
@@ -12,6 +13,14 @@ summary). Two numbers come out per mode:
 - hit rate @k: the share of questions with a hit. The headline number.
 - MRR (mean reciprocal rank): 1/rank of the first right result, averaged, so
   finding it at rank 1 beats finding it at rank 5.
+
+"files" is lenient: any chunk of a long file counts, even one about something
+else. "chunks" is the strict version: each entry is a path and a piece of
+text, and only a code chunk of that path containing the text counts. Text
+rather than line numbers or names, so labels survive edits that move code
+around, and work for chunks that have no name (module code, line windows).
+Questions with chunk labels get a second pair of numbers, chunk hit rate and
+chunk MRR.
 
 Change one thing (chunk size, the embedding model, how results are fused),
 run this again, and compare. Without numbers like these, a retrieval change
@@ -47,6 +56,8 @@ class QuestionResult:
     files: list[str]
     rank: int | None  # 1-based rank of the first right result, None if missed
     found: list[str] = field(default_factory=list)  # citations of the top results
+    chunk_rank: int | None = None  # the same for the first right chunk
+    has_chunks: bool = False  # whether the question has chunk labels at all
 
 
 @dataclass
@@ -63,10 +74,36 @@ class ModeResult:
     def mrr(self) -> float:
         return sum(1 / q.rank for q in self.questions if q.rank) / len(self.questions)
 
+    @property
+    def labelled(self) -> list[QuestionResult]:
+        return [q for q in self.questions if q.has_chunks]
+
+    @property
+    def chunk_hit_rate(self) -> float | None:
+        labelled = self.labelled
+        return sum(q.chunk_rank is not None for q in labelled) / len(labelled) if labelled else None
+
+    @property
+    def chunk_mrr(self) -> float | None:
+        labelled = self.labelled
+        return sum(1 / q.chunk_rank for q in labelled if q.chunk_rank) / len(labelled) if labelled else None
+
 
 def _matches(hit: SearchHit, files: list[str]) -> bool:
     # A folder summary doesn't count: it names the file at best in passing.
     return hit.path in files and (hit.type == "code" or hit.id.startswith("summary:file:"))
+
+
+def parse_chunk_label(label: str) -> tuple[str, str]:
+    """("path", "text") from "path :: text"."""
+    path, sep, text = label.partition(" :: ")
+    if not sep or not path or not text:
+        raise ValueError(f"Chunk label {label!r} should look like 'path/to/file.py :: text in the chunk'")
+    return path, text
+
+
+def _matches_chunk(hit: SearchHit, labels: list[tuple[str, str]]) -> bool:
+    return hit.type == "code" and any(hit.path == path and text in hit.text for path, text in labels)
 
 
 def load_eval(path: str | Path) -> tuple[str, list[dict]]:
@@ -108,7 +145,10 @@ def evaluate(repo: str | Path, questions: list[dict], k: int = 5, mode: str = "h
             query = f"{query} {rewrite(query)}"
         hits = search(repo, query, k=k, mode=search_mode, exclude_paths=exclude, alpha=alpha)
         rank = next((n for n, h in enumerate(hits, 1) if _matches(h, q["files"])), None)
-        results.append(QuestionResult(q["question"], q["files"], rank, [h.citation for h in hits]))
+        labels = [parse_chunk_label(c) for c in q.get("chunks", [])]
+        chunk_rank = next((n for n, h in enumerate(hits, 1) if _matches_chunk(h, labels)), None)
+        results.append(QuestionResult(q["question"], q["files"], rank, [h.citation for h in hits],
+                                      chunk_rank, bool(labels)))
     return ModeResult(mode, k, results)
 
 
@@ -155,9 +195,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Stopped: {e}")
         return 1
     print(f"{len(questions)} questions, top {args.k} results\n")
-    print(f"{'mode':<11} {'hit rate':>9} {'MRR':>6}")
+    with_chunks = results[0].chunk_hit_rate is not None
+    print(f"{'mode':<11} {'hit rate':>9} {'MRR':>6}" + (f" {'chunk hit':>10} {'chunk MRR':>10}" if with_chunks else ""))
     for r in results:
-        print(f"{r.mode:<11} {r.hit_rate:>8.0%} {r.mrr:>6.2f}")
+        row = f"{r.mode:<11} {r.hit_rate:>8.0%} {r.mrr:>6.2f}"
+        if with_chunks:
+            row += f" {r.chunk_hit_rate:>9.0%} {r.chunk_mrr:>10.2f}"
+        print(row)
+    if with_chunks and len(results[0].labelled) < len(questions):
+        print(f"(chunk numbers cover the {len(results[0].labelled)} questions with chunk labels)")
     if cost:
         spent = cost()
         print(f"\nRewriting cost {'nothing (all cached or free)' if not spent else f'${spent:.4f}'}.")
@@ -170,6 +216,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nMissed by {r.mode}:")
             for q in missed:
                 print(f"  - {q.question}\n    wanted {', '.join(q.files)}; got {', '.join(q.found[:3])}")
+        for r in results:
+            wrong_chunk = [q for q in r.labelled if q.rank is not None and q.chunk_rank is None]
+            if not wrong_chunk:
+                continue
+            print(f"\nRight file but not the right chunk, {r.mode}:")
+            for q in wrong_chunk:
+                print(f"  - {q.question}\n    got {', '.join(q.found[:3])}")
     if args.misses and rewrite:
         print("\nRewrites (cached in .docgen/rewrites.json):")
         for q in questions:
