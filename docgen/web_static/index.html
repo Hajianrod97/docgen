@@ -269,6 +269,10 @@
       <span><i class="dot"></i> not yet</span><span><i class="dot error"></i> failed</span>
       <span><i class="dot tiny"></i> small file, covered by its folder</span>
     </div>
+    <div class="row" style="margin-top:1rem;padding-top:.8rem;border-top:1px solid var(--border)">
+      <button onclick="updateSearchIndex()" id="searchIndexBtn">Update search index</button>
+      <span class="hint" style="margin:0" id="searchIndexInfo"></span>
+    </div>
   </div>
   </div>
 
@@ -683,6 +687,7 @@ async function loadHub() {
   if (!findNode(hubData.tree, hubSelected.kind, hubSelected.path)) hubSelected = { kind: 'dir', path: '' };
   renderTree();
   renderPane();
+  renderSearchIndex(hubData.search_index);
   const job = hubData.job;
   if (job && job.running && !hubPoll) startPolling();
   else if (job && !hubPoll) renderJob(job);
@@ -942,6 +947,34 @@ async function exportHub() {
     status.className = 'status ok';
   } catch (e) {
     status.textContent = e.message; status.className = 'status error';
+  }
+}
+
+function renderSearchIndex(st) {
+  let text;
+  if (!st.indexed) text = 'Not built yet. The search index holds every file\'s chunks and the hub\'s summaries, for asking questions about the repo.';
+  else if (st.needs_rebuild) text = `${st.entries} entries, made with older settings; updating rebuilds it.`;
+  else {
+    const behind = [st.files_changed ? `${st.files_changed} file${st.files_changed === 1 ? '' : 's'}` : '',
+                    st.summaries_changed ? `${st.summaries_changed} summar${st.summaries_changed === 1 ? 'y' : 'ies'}` : '']
+      .filter(Boolean).join(' and ');
+    text = `${st.entries} entries` + (behind ? `; ${behind} changed since the last update.` : ', up to date.');
+  }
+  $('searchIndexInfo').textContent = 'Search index: ' + text;
+}
+
+async function updateSearchIndex() {
+  const btn = $('searchIndexBtn'); btn.disabled = true; btn.textContent = 'Indexing...';
+  $('searchIndexInfo').textContent = 'Embedding changed files and summaries (the first run downloads the embedding model, which can take a minute)...';
+  try {
+    const data = await api('POST', '/api/search-index', { repo: repoPath() });
+    renderSearchIndex(data.status);
+    $('searchIndexInfo').textContent += ` This run: ${data.files_indexed} files and ${data.summaries_indexed} summaries indexed, `
+      + `${data.files_removed + data.summaries_removed} removed.`;
+  } catch (e) {
+    $('searchIndexInfo').textContent = e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Update search index';
   }
 }
 

@@ -56,6 +56,7 @@ from docgen.hub_export import default_export_dir, export_hub
 from docgen.indexer import build_index, ensure_unique_ids, index_path, open_collection
 from docgen.models import Chunk
 from docgen.parser import parse_repo
+from docgen.repo_index import index_status, update_index
 from docgen.repos import RepoError, RepoSource, resolve_repo
 from docgen.retriever import ContextItem, get_context
 from docgen.walker import walk_repo
@@ -398,6 +399,7 @@ def hub_view(repo: str):
         "source_urls": {p: source.source_url(p) for p in plan.files} if source.is_clone else None,
         "export_dir": str(default_export_dir(source)),
         "job": _job_view(_hub_jobs.get(str(source.path))),
+        "search_index": index_status(source.path),
     }
 
 
@@ -516,6 +518,23 @@ def hub_export(req: HubRepoRequest):
     out_dir = default_export_dir(source)
     written = export_hub(plan, hub, out_dir, source)
     return {"dir": str(out_dir), "files": [p.relative_to(out_dir).as_posix() for p in written]}
+
+
+# ------------------------------------------------------------- search index
+
+
+class SearchIndexRequest(BaseModel):
+    repo: str
+    rebuild: bool = False
+
+
+@app.post("/api/search-index")
+def search_index(req: SearchIndexRequest):
+    """Index every file's chunks and the hub's summaries for Ask. Only what
+    changed since the last run is embedded again."""
+    path = _resolve_repo(req.repo)
+    stats = update_index(path, rebuild=req.rebuild)
+    return dict(dataclasses.asdict(stats), status=index_status(path))
 
 
 # --------------------------------------------------------------- plan/apply

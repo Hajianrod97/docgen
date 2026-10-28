@@ -16,6 +16,7 @@ Next: a documentation hub for whole repos in any language (file, directory and r
 - [x] Hub phase 1: repo walker for every language, with `.gitignore` / `.docgenignore` and skip rules
 - [x] Hub phase 2: bottom-up summaries (files, directories, overview + diagram) with a cache, from the command line
 - [x] Hub phase 3: Hub tab in the web UI, Markdown export, public GitHub URLs
+- [x] Hub phase 4: search index of every file's chunks and the hub's summaries (for "Ask the repo")
 
 ## Usage
 
@@ -129,6 +130,22 @@ A public `https://github.com/owner/repo` URL is shallow-cloned into `~/.cache/do
 ### Markdown export
 
 **Export Markdown** (or `--export` on the command line) writes one `README.md` per folder: the top one has the overview, the diagram as a `mermaid` code block (GitHub draws these) and the root folder; each folder's README has its role, a table of what's in it, how it fits together, and its files' summaries, with links to the source. A local repo exports to `docs/hub/`, which the walker always skips so the hub never summarizes its own output. A GitHub repo exports to `./output/owner-repo/`. Re-exporting removes READMEs it wrote earlier for folders that no longer exist, and nothing else.
+
+## The search index (for "Ask the repo")
+
+Questions about a repo are answered from a search index: a ChromaDB collection in `.docgen/chroma`, separate from the docstring index. It holds two types of entry:
+
+- **Code chunks** from every file the walker reads. Python is split with `ast` into top-level functions and classes (with their decorators and leading comments), with long classes split into methods and the code between definitions kept as "module" chunks. Markdown is split at headings, and each chunk keeps its heading path, such as `Install > macOS`. Everything else is split into 60-line windows that overlap by 10 lines. Every chunk records its file and line range, which answers will cite.
+- **Summary parts**: the hub's file, folder and overview summaries, split at their headings.
+
+Click **Update search index** in the Hub tab, or run:
+
+```bash
+python -m docgen.repo_index path/to/repo                       # update
+python -m docgen.repo_index path/to/repo --query "how are GitHub repos cloned"
+```
+
+Only files and summaries whose text changed since the last run are embedded again (`.docgen/repo_index.json` keeps each one's hash). Changing the chunking rules or the embedding model rebuilds the whole index. Run it again after building the hub so the new summaries are included. `--query` prints the closest entries, which is a quick way to see what vector search finds and what it misses.
 
 ## Which files are read
 
