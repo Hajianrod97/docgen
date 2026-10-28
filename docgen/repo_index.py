@@ -68,7 +68,9 @@ def _sha(text: str) -> str:
 
 def embedding_name() -> str:
     fn = get_embedding_function()
-    return fn.name() if fn is not None else "chroma-default:all-MiniLM-L6-v2"
+    if fn is None:
+        return "chroma-default:all-MiniLM-L6-v2"
+    return getattr(fn, "docgen_id", None) or fn.name()
 
 
 def get_client(repo_path: str | Path):

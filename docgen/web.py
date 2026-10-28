@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from docgen.ask import CONTEXT_CHARS, DEFAULT_K, ask, make_ask_completer
+from docgen.embeddings import EmbeddingError
 from docgen.hub import (
     HubStopped,
     build_hub,
@@ -259,7 +260,10 @@ def search_index(req: SearchIndexRequest):
     """Index every file's chunks and the hub's summaries for Ask. Only what
     changed since the last run is embedded again."""
     path = _resolve_repo(req.repo)
-    stats = update_index(path, rebuild=req.rebuild)
+    try:
+        stats = update_index(path, rebuild=req.rebuild)
+    except EmbeddingError as e:
+        raise HTTPException(502, str(e))
     return dict(dataclasses.asdict(stats), status=index_status(path))
 
 
@@ -309,11 +313,11 @@ def ask_endpoint(req: AskRequest):
         complete, model, meter = make_ask_completer(req.provider, req.model, req.api_key)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    update_index(path)
     try:
+        update_index(path)
         answer = ask(path, req.question, complete, model, meter, k=max(1, min(req.k, 20)),
                      mode=req.mode, budget=CONTEXT_CHARS[req.provider])
-    except ProviderError as e:
+    except (ProviderError, EmbeddingError) as e:
         raise HTTPException(502, str(e))
     return {
         "answer": answer.text,

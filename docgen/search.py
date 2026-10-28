@@ -15,6 +15,10 @@ scores 1 / (RRF_K + rank) in every list it appears in, and the scores are
 added. RRF only looks at ranks, so it needs no tuning to make cosine
 similarities and BM25 scores comparable, which they aren't.
 
+Plain RRF trusts both lists equally, so a result only one search found loses
+to results both found further down. `alpha` weights the vector list against
+the keyword list: 0.5 is plain RRF, 1.0 is vector only, 0.0 keyword only.
+
 The BM25 index is built in memory from the documents already stored in
 ChromaDB, and rebuilt whenever the index's manifest changes.
 """
@@ -31,6 +35,7 @@ from pathlib import Path
 from docgen.repo_index import manifest_path, open_repo_collection
 
 RRF_K = 60  # the usual constant; larger values flatten the difference between ranks
+HYBRID_ALPHA = 0.5  # weight of the vector list in hybrid fusion (0.5 = plain RRF)
 CANDIDATES = 30  # how many results each half contributes before fusion
 MODES = ("hybrid", "vector", "keyword")
 
@@ -88,12 +93,13 @@ class BM25:
         return out
 
 
-def rrf(rankings: list[list[str]], k: int = RRF_K) -> dict[str, float]:
-    """Reciprocal rank fusion of several ranked id lists."""
+def rrf(rankings: list[list[str]], k: int = RRF_K,
+        weights: list[float] | None = None) -> dict[str, float]:
+    """Reciprocal rank fusion of several ranked id lists, each optionally weighted."""
     fused: dict[str, float] = {}
-    for ranking in rankings:
+    for ranking, weight in zip(rankings, weights or [1.0] * len(rankings)):
         for rank, doc_id in enumerate(ranking, 1):
-            fused[doc_id] = fused.get(doc_id, 0.0) + 1.0 / (k + rank)
+            fused[doc_id] = fused.get(doc_id, 0.0) + weight / (k + rank)
     return fused
 
 
@@ -153,12 +159,16 @@ def _strip_header(document: str) -> str:
 
 def search(repo_path: str | Path, query: str, k: int = 8, mode: str = "hybrid",
            types: tuple[str, ...] | None = None,
-           exclude_paths: frozenset[str] = frozenset()) -> list[SearchHit]:
+           exclude_paths: frozenset[str] = frozenset(),
+           alpha: float = HYBRID_ALPHA) -> list[SearchHit]:
     """The k best index entries for a question. `mode` picks hybrid, vector
     only or keyword only (useful for comparing them); `types` limits results
-    to "code" or "summary" entries; entries of `exclude_paths` are left out."""
+    to "code" or "summary" entries; entries of `exclude_paths` are left out;
+    `alpha` weights vector against keyword results in hybrid mode."""
     if mode not in MODES:
         raise ValueError(f"Unknown search mode {mode!r}; use one of {', '.join(MODES)}")
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError(f"alpha must be between 0 and 1, not {alpha}")
     repo = Path(repo_path).resolve()
     collection = open_repo_collection(repo)
     corpus = _corpus(repo, collection)
@@ -182,7 +192,8 @@ def search(repo_path: str | Path, query: str, k: int = 8, mode: str = "hybrid",
         ranked = sorted(range(len(scores)), key=lambda i: -scores[i])
         keyword = [corpus.ids[i] for i in ranked if scores[i] > 0 and allowed(corpus.ids[i])][:CANDIDATES]
 
-    fused = rrf([r for r in (vector, keyword) if r])
+    # Weights 2·alpha and 2·(1 - alpha), so alpha = 0.5 gives plain RRF's scores.
+    fused = rrf([vector, keyword], weights=[2 * alpha, 2 * (1 - alpha)])
     vector_rank = {doc_id: n for n, doc_id in enumerate(vector, 1)}
     keyword_rank = {doc_id: n for n, doc_id in enumerate(keyword, 1)}
     best = sorted(fused, key=lambda i: (-fused[i], i))[:k]

@@ -90,11 +90,11 @@ python -m docgen.repo_index path/to/repo --query "how are GitHub repos cloned"
 
 Only files and summaries whose text changed since the last run are embedded again (`.docgen/repo_index.json` keeps each one's hash). Changing the chunking rules or the embedding model rebuilds the whole index. Run it again after building the hub so the new summaries are included. `--query` prints the closest entries, which is a quick way to see what vector search finds and what it misses.
 
-The embedding model is all-MiniLM-L6-v2, run locally by ChromaDB and downloaded on first use (about 80 MB). `DOCGEN_EMBEDDINGS=hash` swaps in an offline embedder that matches shared words rather than meaning; the tests use it.
+The embedding model is all-MiniLM-L6-v2, run locally by ChromaDB and downloaded on first use (about 80 MB). It reads only the first 256 word pieces of a chunk. `DOCGEN_EMBEDDINGS=ollama` uses nomic-embed-text through a local Ollama server instead (`ollama pull nomic-embed-text`; `ollama:<model>` picks another), which reads whole chunks. `DOCGEN_EMBEDDINGS=hash` swaps in an offline embedder that matches shared words rather than meaning; the tests use it. Changing the choice rebuilds the index on its next update, since vectors from different models can't be compared.
 
 ### Hybrid search
 
-`docgen/search.py` runs two searches and merges them. Vector search matches meaning ("downloaded" finds `git clone`) but is weak on exact names; BM25 keyword search finds `estimate` at once but knows no synonyms. The two rankings are merged with reciprocal rank fusion, which only looks at ranks, so the two kinds of score never need to be made comparable. The web server exposes it at `GET /api/search?repo=...&q=...&mode=hybrid|vector|keyword`.
+`docgen/search.py` runs two searches and merges them. Vector search matches meaning ("downloaded" finds `git clone`) but is weak on exact names; BM25 keyword search finds `estimate` at once but knows no synonyms. The two rankings are merged with reciprocal rank fusion, which only looks at ranks, so the two kinds of score never need to be made comparable. `HYBRID_ALPHA` weights the two lists (0.5, the default, is plain RRF; 1.0 is vector only); see below for why it stays at 0.5. The web server exposes it at `GET /api/search?repo=...&q=...&mode=hybrid|vector|keyword`.
 
 ### Measuring it
 
@@ -119,6 +119,26 @@ It updates the index, runs every question through each search mode, and prints t
 | hybrid | 94%, MRR 0.76 | 94%, MRR 0.81 |
 | vector | 61%, MRR 0.49 | **83%**, MRR 0.65 |
 | keyword | 100%, MRR 0.82 | 94%, MRR 0.81 |
+
+**Embedding models.** Hybrid search over both question sets (38 questions), MiniLM against nomic-embed-text:
+
+| model | hit rate, top 5 | hit rate, top 3 |
+|---|---|---|
+| all-MiniLM-L6-v2 | 37/38 | 34/38 |
+| nomic-embed-text | 38/38 | 32/38 |
+
+nomic did better on gitsummarize in every mode but ranked worse in the top 3 on docgen. With this few questions one question is worth 5–6 points, so neither is a clear winner and MiniLM stays the default.
+
+**Weighting the two halves.** Plain RRF trusts both lists equally, so a result only one half finds gets pushed down: on docgen, `imports.py` was rank 1 in vector search but rank 4 after fusion, and on 8 of 20 questions hybrid ranked the right file lower than vector search alone. `--alpha` weights the vector list more. Tuned on docgen, α ≈ 0.6–0.8 was best (MiniLM at α = 0.8: top-3 hit rate 100%, MRR 0.73). Checked on gitsummarize, which it wasn't tuned on, every α above 0.5 was *worse* for both models (MiniLM top-5 hit rate 94% → 89%, MRR 0.81 → 0.75). One weight doesn't carry over between repos, so the default stays at plain RRF; reranking the fused results is the better fix.
+
+**Retrieval-augmented answers against a tool-using agent.** The same local model (qwen2.5-coder:7b) answered the 18 gitsummarize questions two ways, graded by hand against the code:
+
+| approach | correct | partly | wrong | median time |
+|---|---|---|---|---|
+| Ask (hybrid search, 8 sources in the prompt) | 16 | 1 | 1 | 35 s |
+| agent with `list_files` / `grep` / `read_file` tools, up to 10 turns | 3 | 4 | 11 | 45 s |
+
+Ask retrieved the right file for 17 of 18 questions, but only 9 answers included citations. The agent gave up twice at the turn limit, made up code or files four times, and used up to 44K input tokens on one question. A 7B model isn't good at choosing what to read next; fixed retrieval chooses for it. On a repo small enough to fit (`example_multilang`, about 1.3K tokens), putting the whole repo in the prompt was best: 4 of 4 correct, with exact citations.
 
 The questions were written by someone who knew the code, so treat these as optimistic. To evaluate another repo, copy the file, point `"repo"` at it (a path or GitHub URL) and write questions whose answers you know. Then change one thing at a time, such as chunk size or the embedding model, and compare.
 
@@ -178,7 +198,8 @@ Styled as a plain dark dev-tool (GitHub Dark-style grays and blue), and self-con
 
 ## Known limitations
 
-- Neither model client has been run against the real service by the author (no API key and no Ollama install were available); both are tested against fakes that follow the documented protocols. Build the hub for a small repo and ask a couple of questions first, and read the output, before using it at scale.
+- The Ollama client has been run against a real server (qwen2.5-coder:7b and nomic-embed-text), which is where the measurements above come from. The Anthropic client has only been tested against a fake that follows the documented protocol, since no API key was available. Build the hub for a small repo and ask a couple of questions first, and read the output, before using it at scale.
+- With a 7B local model, Ask often leaves out citations, the hub summaries can crowd code out of the sources for broad questions, and an answer takes 18–40 seconds.
 - Summaries and answers describe only what the model was shown, and can still be wrong. Answers cite their sources so you can check them; summaries don't.
 - Imports are found with patterns for Python and JavaScript/TypeScript only. Files in other languages get their folder neighbors as context instead.
 - The embedding model reads only the first 256 word pieces of a chunk, so the end of a long chunk is barely searchable.

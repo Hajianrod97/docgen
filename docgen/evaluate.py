@@ -36,7 +36,7 @@ from pathlib import Path
 
 from typing import Callable
 
-from docgen.search import MODES, SearchHit, search
+from docgen.search import HYBRID_ALPHA, MODES, SearchHit, search
 
 # Rewrite modes, and the search mode each one runs on the rewritten query.
 REWRITE_MODES = {"rw-keyword": "keyword", "rw-hybrid": "hybrid"}
@@ -90,7 +90,8 @@ def _relative_to(path: Path, repo: Path) -> str | None:
 
 def evaluate(repo: str | Path, questions: list[dict], k: int = 5, mode: str = "hybrid",
              eval_file: str | Path | None = None,
-             rewrite: Callable[[str], str] | None = None) -> ModeResult:
+             rewrite: Callable[[str], str] | None = None,
+             alpha: float = HYBRID_ALPHA) -> ModeResult:
     """Run every question through search. If the eval file sits inside the
     repo, it's left out of the results: it contains the questions word for
     word, so it would otherwise "answer" all of them. A rewrite mode needs
@@ -106,7 +107,7 @@ def evaluate(repo: str | Path, questions: list[dict], k: int = 5, mode: str = "h
         query = q["question"]
         if mode in REWRITE_MODES:
             query = f"{query} {rewrite(query)}"
-        hits = search(repo, query, k=k, mode=search_mode, exclude_paths=exclude)
+        hits = search(repo, query, k=k, mode=search_mode, exclude_paths=exclude, alpha=alpha)
         rank = next((n for n, h in enumerate(hits, 1) if _matches(h, q["files"])), None)
         results.append(QuestionResult(q["question"], q["files"], rank, [h.citation for h in hits]))
     return ModeResult(mode, k, results)
@@ -122,6 +123,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m docgen.evaluate", description=__doc__.splitlines()[0])
     parser.add_argument("eval_file")
     parser.add_argument("--k", type=int, default=5, help="how many results count (default 5)")
+    parser.add_argument("--alpha", type=float, default=HYBRID_ALPHA,
+                        help=f"weight of vector results in hybrid search, 0-1 (default {HYBRID_ALPHA})")
     parser.add_argument("--mode", choices=MODES + ("all",), default="all")
     parser.add_argument("--misses", action="store_true", help="list the questions each mode missed")
     parser.add_argument("--rewrite", action="store_true",
@@ -147,7 +150,8 @@ def main(argv: list[str] | None = None) -> int:
         rewrite, cost = _make_rewriter(repo, args.provider, args.rewrite_model)
         modes = modes + tuple(REWRITE_MODES)
     try:
-        results = [evaluate(repo, questions, args.k, m, eval_file=args.eval_file, rewrite=rewrite) for m in modes]
+        results = [evaluate(repo, questions, args.k, m, eval_file=args.eval_file, rewrite=rewrite, alpha=args.alpha)
+                   for m in modes]
     except ProviderError as e:
         print(f"Stopped: {e}")
         return 1

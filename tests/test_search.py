@@ -201,3 +201,18 @@ def test_corpus_cache_is_per_repo(repo, tmp_path):
     assert search(other, "penguin", mode="keyword")[0].path == "solo.py"
     assert not search(repo, "penguin", mode="keyword")
     assert str(repo.resolve()) in searchmod._corpora
+
+
+def test_weighted_rrf_and_alpha():
+    assert rrf([["a", "b"], ["b", "c"]], weights=[2.0, 0.0]) == pytest.approx({"a": 2 / 61, "b": 2 / 62, "c": 0.0})
+    # Equal weights of 1.0 are plain RRF.
+    assert rrf([["a"], ["a"]], weights=[1.0, 1.0]) == rrf([["a"], ["a"]])
+
+
+def test_alpha_shifts_hybrid_toward_one_half(repo):
+    plain = search(repo, "TaskStore add task", k=5)
+    assert [h.id for h in search(repo, "TaskStore add task", k=5, alpha=0.5)] == [h.id for h in plain]
+    vector_only = [h.id for h in search(repo, "TaskStore add task", k=5, mode="vector")]
+    assert [h.id for h in search(repo, "TaskStore add task", k=5, alpha=1.0)][:len(vector_only)] == vector_only
+    with pytest.raises(ValueError, match="alpha"):
+        search(repo, "x", alpha=1.5)
