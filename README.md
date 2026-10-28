@@ -18,6 +18,7 @@ Next: a documentation hub for whole repos in any language (file, directory and r
 - [x] Hub phase 3: Hub tab in the web UI, Markdown export, public GitHub URLs
 - [x] Hub phase 4: search index of every file's chunks and the hub's summaries (for "Ask the repo")
 - [x] Hub phase 5: hybrid search (vector + BM25) and an eval set to measure it
+- [x] Hub phase 6: Ask tab, questions answered from search results with `file:line` citations
 
 ## Usage
 
@@ -169,6 +170,20 @@ It updates the index, runs every question through each search mode, and prints t
 | keyword | 85% | 0.54 |
 
 The questions were written by someone who knew the code, so treat these as optimistic. To evaluate another repo, copy the file, point `"repo"` at it (a path or GitHub URL) and write questions whose answers you know. Then change one thing at a time, such as chunk size or the embedding model, and compare.
+
+## Asking questions
+
+The **Ask** tab answers questions about the repo. The question goes through hybrid search; the best results (8 by default) go into the prompt as numbered sources, and the model is told to answer only from them and to cite each claim like `[2]`. Each citation becomes a link such as `store.py:12-30`; clicking it opens that file in the Hub with the cited lines shown. **Retrieved sources** lists everything search found, which ones were cited, and each one's rank in the vector and keyword halves, so you can see why an answer was good or bad: usually the right code either was or wasn't retrieved.
+
+The search index is updated before each question (quick when little changed), but it has to exist first: click **Update search index** in the Hub tab once. The default model is `claude-sonnet-5-5`; a question costs a few cents, shown under the answer. With Ollama it's free, with a smaller prompt to fit the local model's context.
+
+From the command line:
+
+```bash
+python -m docgen.ask path/to/repo "How are GitHub repos cloned?" --sources
+```
+
+Each question is answered on its own, with no memory of earlier ones. If an answer cites a source number that doesn't exist, or cites nothing, the UI says so.
 
 ## Which files are read
 

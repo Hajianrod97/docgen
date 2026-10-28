@@ -184,7 +184,7 @@ class HubModels:
         for model, meter in ((self.file_model, self.file_meter), (self.top_model, self.top_meter)):
             if meter is None:
                 continue
-            cost = _cost(model, meter.input_tokens, meter.output_tokens)
+            cost = model_cost(model, meter.input_tokens, meter.output_tokens)
             if cost is None:
                 return None
             total += cost
@@ -245,8 +245,8 @@ class HubPlan:
         top_in_tokens = top_in // 4
         file_out = calls["file"] * EST_OUTPUT_TOKENS["file"] + calls["section"] * EST_OUTPUT_TOKENS["section"]
         top_out = calls["dir"] * EST_OUTPUT_TOKENS["dir"] + calls["overview"] * EST_OUTPUT_TOKENS["overview"]
-        cost = _cost(file_model, file_in_tokens, file_out)
-        top_cost = _cost(top_model, top_in_tokens, top_out)
+        cost = model_cost(file_model, file_in_tokens, file_out)
+        top_cost = model_cost(top_model, top_in_tokens, top_out)
         return {
             "calls": calls,
             "total_calls": sum(calls.values()),
@@ -295,7 +295,7 @@ def make_hub_models(
     )
 
 
-def _cost(model: str, input_tokens: int, output_tokens: int) -> float | None:
+def model_cost(model: str, input_tokens: int, output_tokens: int) -> float | None:
     """USD for this many tokens. Local (Ollama) models are free; a Claude model
     missing from PRICES gives None, since its price is unknown."""
     if model not in PRICES:

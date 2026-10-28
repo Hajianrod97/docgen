@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from docgen.ask import CONTEXT_CHARS, DEFAULT_K, ask, make_ask_completer
 from docgen.generator import (
     DEFAULT_MODEL,
     GenerationError,
@@ -551,6 +552,54 @@ def search_endpoint(repo: str, q: str, k: int = 8, mode: str = "hybrid", type: s
     types = (type,) if type else None
     return {"hits": [dataclasses.asdict(h) | {"citation": h.citation}
                      for h in search_repo(path, q, k=k, mode=mode, types=types)]}
+
+
+# ---------------------------------------------------------------------- ask
+
+
+class AskRequest(BaseModel):
+    repo: str
+    question: str
+    provider: str = "anthropic"
+    model: str | None = None
+    api_key: str | None = None  # anthropic only; used for this request only, never stored
+    k: int = DEFAULT_K
+    mode: str = "hybrid"
+
+
+@app.post("/api/ask")
+def ask_endpoint(req: AskRequest):
+    """Answer a question from the search index, citing the sources it used.
+    The index is brought up to date first, which is quick when little changed."""
+    path = _resolve_repo(req.repo)
+    if not req.question.strip():
+        raise HTTPException(400, "Type a question first.")
+    if req.mode not in MODES:
+        raise HTTPException(400, f"Unknown search mode {req.mode!r}; use one of {', '.join(MODES)}")
+    if req.provider not in CONTEXT_CHARS:
+        raise HTTPException(400, f"Unknown provider: {req.provider}")
+    if req.provider == "anthropic" and not req.api_key:
+        raise HTTPException(400, "Anthropic provider needs an API key.")
+    if not index_status(path)["indexed"]:
+        raise HTTPException(400, "No search index yet. Click \"Update search index\" in the Hub tab first.")
+    try:
+        complete, model, meter = make_ask_completer(req.provider, req.model, req.api_key)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    update_index(path)
+    try:
+        answer = ask(path, req.question, complete, model, meter, k=max(1, min(req.k, 20)),
+                     mode=req.mode, budget=CONTEXT_CHARS[req.provider])
+    except ProviderError as e:
+        raise HTTPException(502, str(e))
+    return {
+        "answer": answer.text,
+        "sources": [dataclasses.asdict(h) | {"citation": h.citation} for h in answer.sources],
+        "cited": answer.cited,
+        "unknown_citations": answer.unknown_citations,
+        "model": answer.model,
+        "cost_usd": answer.cost_usd,
+    }
 
 
 # --------------------------------------------------------------- plan/apply
