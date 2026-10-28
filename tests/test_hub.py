@@ -66,7 +66,7 @@ class FakeModel:
             return "file", re.match(r"Summarize the file (\S+) ", user).group(1)
         if user.startswith("Summarize the directory"):
             return "dir", re.match(r"Summarize the directory (.+?) for", user).group(1)
-        if "front page of a documentation hub" in user:
+        if "overview page of this repository's documentation" in user:
             return "overview", "overview"
         if "does not render" in user:
             return "diagram_fix", "diagram"
@@ -433,3 +433,12 @@ def test_anthropic_completer_rejects_unusable_stops(monkeypatch, stop_reason):
     fake_anthropic(monkeypatch, FakeResponse("partial", stop_reason))
     with pytest.raises(ProviderError):
         make_anthropic_completer("claude-haiku-5-5", api_key="k")("sys", "user")
+
+
+def test_changing_a_prompt_redoes_cached_summaries(repo, monkeypatch):
+    build_hub(repo, models_for(FakeModel()))
+    assert plan_hub(repo).todo_files == []
+    monkeypatch.setattr(hubmod, "PROMPT_VERSION", "different-prompts")
+    plan = plan_hub(repo)
+    assert plan.todo_files == ["backend/store.py"] and plan.todo_overview
+    assert len(plan.todo_dirs) == 4

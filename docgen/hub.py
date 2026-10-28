@@ -46,7 +46,6 @@ from docgen.llm import (
 from docgen.imports import import_graph, reverse_graph
 from docgen.walker import RepoFile, walk_repo
 
-PROMPT_VERSION = "1"  # bump when prompts change, so cached summaries are redone
 HUB_FILENAME = ".docgen/hub.json"
 TINY_FILE_LINES = 30
 SECTION_CHARS = 12_000  # about 3,000 tokens: fits Ollama's 8K window with room to spare
@@ -91,7 +90,7 @@ Write notes on this section for a later step that will merge all sections into o
 
 Output only the notes, in plain markdown bullets, inside <notes></notes> tags."""
 
-FILE_TASK = """Summarize the file {path} ({language}) for a documentation hub.
+FILE_TASK = """Summarize the file {path} ({language}) for developers who are new to this repository.
 
 {body_intro}
 
@@ -114,7 +113,7 @@ Repo files from <context> that import it, and what they use it for if visible.
 FILE_BODY_INTRO = "<file> holds its full text."
 NOTES_BODY_INTRO = "The file was too long to show at once, so <notes> holds notes written on each section of it, in order."
 
-DIR_TASK = """Summarize the directory {path} for a documentation hub.
+DIR_TASK = """Summarize the directory {path} for developers who are new to this repository.
 
 <directory> lists what it contains: subdirectories and files with a one-line purpose each, and the full text of small files.
 
@@ -133,7 +132,7 @@ DIR_TINY_INSTRUCTIONS = """<small_files>
 One line per small file shown with its full text, in the form `name: one-sentence description`.
 </small_files>"""
 
-OVERVIEW_TASK = """Write the front page of a documentation hub for this repository.
+OVERVIEW_TASK = """Write the overview page of this repository's documentation, for developers who are new to it.
 
 <tree> lists every directory and file with a one-line purpose. <readme> is the repo's README, if it has one. <directories> holds summaries of the main directories.
 
@@ -142,6 +141,7 @@ Output exactly two parts:
 Markdown using these headings, in this order. Leave out any heading the material does not support:
 ## What it does
 ## Tech stack
+(Only languages, frameworks and tools named in the material, such as in a package.json or requirements file. Don't infer a framework that isn't named.)
 ## Architecture
 ## Entry points
 ## How data flows
@@ -159,6 +159,14 @@ DIAGRAM_FIX_TASK = """This Mermaid diagram does not render: {problem}
 </diagram_source>
 
 Reply with a corrected version inside <diagram></diagram> tags: only the Mermaid source, starting with `flowchart TD`, no code fences."""
+
+
+# Part of every cache key: a hash of the prompts themselves, so editing any
+# prompt redoes the summaries built with the old wording, with nothing to bump.
+PROMPT_VERSION = hashlib.sha1("\0".join([
+    SYSTEM_PROMPT, SECTION_TASK, FILE_TASK, FILE_BODY_INTRO, NOTES_BODY_INTRO,
+    DIR_TASK, DIR_TINY_INSTRUCTIONS, OVERVIEW_TASK, DIAGRAM_FIX_TASK,
+]).encode("utf-8")).hexdigest()[:12]
 
 
 class HubStopped(Exception):
