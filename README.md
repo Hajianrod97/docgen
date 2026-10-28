@@ -74,7 +74,11 @@ A public `https://github.com/owner/repo` URL is shallow-cloned into `~/.cache/do
 
 Questions are answered from a search index: a ChromaDB collection in `.docgen/chroma`. It holds two types of entry:
 
-- **Code chunks** from every file the walker reads. Python is split with `ast` into top-level functions and classes (with their decorators and leading comments), with long classes split into methods and the code between definitions kept as "module" chunks. Markdown is split at headings, and each chunk keeps its heading path, such as `Install > macOS`. Everything else is split into 60-line windows that overlap by 10 lines. Every chunk records its file and line range, which answers cite.
+- **Code chunks** from every file the walker reads, split along the code's own structure. Every chunk records its file and line range, which answers cite.
+  - **Python** is split with `ast` into top-level functions and classes (with their decorators and leading comments). Long classes are split into methods, and the code between definitions is kept as "module" chunks.
+  - **TypeScript, JavaScript, Go, Rust, Java, C#, Ruby, PHP, Kotlin, Swift, C/C++** and a few more are parsed with [tree-sitter](https://tree-sitter.github.io/) and split the same way: functions, classes, interfaces, types, structs and `const Page = () => {...}` components become chunks named after what they define. A definition over 120 lines is split into what it contains, such as a React component's inner handlers (`DocsPage.generateDocumentation`). Each language's grammar downloads on first use (a few MB) into `~/Library/Caches/tree-sitter-language-pack/` on macOS; set `DOCGEN_TREE_SITTER=0` to turn this off.
+  - **Markdown** is split at headings, and each chunk keeps its heading path, such as `Install > macOS`.
+  - **Everything else**, and any file a parser can't handle (or whose grammar couldn't be downloaded), is split into 60-line windows that overlap by 10 lines.
 - **Summary parts**: the hub's file, folder and overview summaries, split at their headings.
 
 Click **Update search index** in the Hub tab, or run:
@@ -107,6 +111,14 @@ It updates the index, runs every question through each search mode, and prints t
 | hybrid | 95% | 85% | 0.66 |
 | vector | 95% | 80% | 0.59 |
 | keyword | 80% | 65% | 0.50 |
+
+`evals/gitsummarize.json` has 18 questions about [gitsummarize](https://github.com/antarixxx/gitsummarize), mostly about its TypeScript frontend, for measuring chunking in languages other than Python. Switching TypeScript from 60-line windows to tree-sitter chunks changed it like this (top 5):
+
+| mode | windows | tree-sitter |
+|---|---|---|
+| hybrid | 94%, MRR 0.76 | 94%, MRR 0.81 |
+| vector | 61%, MRR 0.49 | **83%**, MRR 0.65 |
+| keyword | 100%, MRR 0.82 | 94%, MRR 0.81 |
 
 The questions were written by someone who knew the code, so treat these as optimistic. To evaluate another repo, copy the file, point `"repo"` at it (a path or GitHub URL) and write questions whose answers you know. Then change one thing at a time, such as chunk size or the embedding model, and compare.
 
@@ -170,6 +182,7 @@ Styled as a plain dark dev-tool (GitHub Dark-style grays and blue), and self-con
 - Summaries and answers describe only what the model was shown, and can still be wrong. Answers cite their sources so you can check them; summaries don't.
 - Imports are found with patterns for Python and JavaScript/TypeScript only. Files in other languages get their folder neighbors as context instead.
 - The embedding model reads only the first 256 word pieces of a chunk, so the end of a long chunk is barely searchable.
+- Line numbers for tree-sitter chunks come from byte offsets, because reading a node's `start_point.row` crashes Python with py-tree-sitter 0.26.0.
 - Test files are indexed like everything else and often take up search result slots.
 - **Update search index** runs inside the request, so the page waits while a large repo is embedded for the first time.
 - The diagram is shown as Mermaid source in the web UI, not drawn.

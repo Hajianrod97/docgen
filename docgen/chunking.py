@@ -6,11 +6,20 @@
   between definitions (imports, constants, scripts) becomes "module" chunks,
   so every line of the file lands in some chunk. A file that doesn't parse
   falls back to line windows.
+- Other code (TypeScript, JavaScript, Go, Rust, Java, C#, Ruby, ...) is parsed
+  with tree-sitter, which gives a syntax tree in the same shape for every
+  language, and split the same way as Python: functions, classes, interfaces
+  and so on become chunks named after what they define, including the
+  `const Page = () => {...}` style used for React components. A definition
+  too long for one chunk is split into what it contains (a class into its
+  methods, a component into its inner handlers), and the rest of its body is
+  kept as "body" chunks. Grammars are downloaded on first use for each
+  language; if one can't be had (offline, say), the file falls back to windows.
 - Markdown is split at headings. Each chunk knows its heading path, such as
   "Install > macOS", which says more about it than the text alone.
-- Everything else is split into windows of WINDOW_LINES lines that overlap by
-  WINDOW_OVERLAP, so something that sits on a window edge still appears whole
-  in one of them.
+- Everything else (and any file a parser can't handle) is split into windows
+  of WINDOW_LINES lines that overlap by WINDOW_OVERLAP, so something that sits
+  on a window edge still appears whole in one of them.
 
 Any chunk still longer than MAX_CHUNK_LINES is cut into windows too. One
 vector has to stand for a whole chunk, so a huge chunk ends up a blur of many
@@ -21,10 +30,12 @@ things, and the default embedding model (all-MiniLM-L6-v2) only reads its first
 from __future__ import annotations
 
 import ast
+import bisect
+import os
 import re
 from dataclasses import dataclass
 
-CHUNKER_VERSION = "1"  # bump when the rules change, so the index is rebuilt
+CHUNKER_VERSION = "2"  # bump when the rules change, so the index is rebuilt
 
 WINDOW_LINES = 60
 WINDOW_OVERLAP = 10
@@ -40,7 +51,7 @@ class CodeChunk:
     start_line: int  # 1-based, inclusive
     end_line: int
     text: str
-    unit: str  # function, class, method, module, section, window
+    unit: str  # function, class, method, interface, type, module, body, section, window, ...
     symbol: str = ""  # e.g. "TaskStore.add", or a heading path for Markdown
 
     @property
@@ -136,6 +147,237 @@ def _python_chunks(text: str, lines: list[str]) -> list[tuple[int, int, str, str
     return _python_units(tree.body, lines, (1, len(lines)), None)
 
 
+# -------------------------------------------------------------- tree-sitter
+
+# File suffix -> tree-sitter grammar. TSX needs its own grammar for the JSX.
+TREE_SITTER_GRAMMARS = {
+    ".ts": "typescript", ".mts": "typescript", ".cts": "typescript", ".tsx": "tsx",
+    ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+    ".go": "go", ".rs": "rust", ".java": "java", ".kt": "kotlin", ".kts": "kotlin",
+    ".scala": "scala", ".rb": "ruby", ".php": "php", ".cs": "csharp", ".swift": "swift",
+    ".c": "c", ".h": "c", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".hpp": "cpp",
+    ".lua": "lua", ".dart": "dart", ".ex": "elixir", ".exs": "elixir",
+}
+
+# What a node type defines, matched by substring on the node's type name, first
+# match wins. Grammars name things differently (function_declaration in TS,
+# function_item in Rust, func_literal in Go), but the words are shared.
+_KIND_WORDS = (
+    ("method", "method"), ("constructor", "method"),
+    ("interface", "interface"), ("trait", "trait"), ("impl", "impl"),
+    ("class", "class"), ("struct", "struct"), ("enum", "enum"), ("object_declaration", "class"),
+    ("type_alias", "type"), ("type_declaration", "type"), ("type_item", "type"),
+    ("function", "function"), ("func", "function"),
+    ("mod_item", "module"), ("namespace", "module"), ("internal_module", "module"),
+)
+# Type names that contain those words but aren't definitions.
+_NOT_DEFINITIONS = ("call", "invocation", "expression", "reference", "parameter", "argument",
+                    "identifier", "body", "_type", "signature_help")
+# Siblings that belong to the definition after them, like Python's decorators.
+_ATTACHED = ("comment", "attribute", "decorator", "annotation")
+_CLASS_KINDS = ("class", "interface", "trait", "impl", "struct", "module")
+_FUNCTION_VALUES = ("arrow_function", "function_expression", "function", "generator_function")
+
+_CLOSERS = re.compile(r"\s*([)\]}>;,]|end)*\s*")
+
+_parsers: dict = {}
+
+
+def _tree_sitter_parser(grammar: str):
+    """A cached parser for the grammar, or None if tree-sitter is turned off
+    (DOCGEN_TREE_SITTER=0) or the grammar can't be loaded."""
+    if os.environ.get("DOCGEN_TREE_SITTER", "1") == "0":
+        return None
+    if grammar not in _parsers:
+        try:
+            from tree_sitter_language_pack import get_parser
+
+            _parsers[grammar] = get_parser(grammar)
+        except Exception:  # not installed, unknown grammar, or the download failed
+            _parsers[grammar] = None
+    return _parsers[grammar]
+
+
+@dataclass
+class _Source:
+    """The parsed file's bytes, plus where each line starts, for turning a
+    node's byte offsets into line numbers. Line numbers come from byte offsets
+    rather than the nodes' start_point/end_point: in py-tree-sitter 0.26.0,
+    reading `.row` from those points crashes the interpreter."""
+
+    data: bytes
+    line_starts: list[int]
+
+    @classmethod
+    def of(cls, data: bytes) -> "_Source":
+        starts = [0]
+        starts += [i + 1 for i, b in enumerate(data) if b == 0x0A]
+        return cls(data, starts)
+
+
+def _text(node, source: _Source) -> str:
+    return source.data[node.start_byte:node.end_byte].decode("utf-8", "replace")
+
+
+def _lines_of(node, source: _Source) -> tuple[int, int]:
+    """1-based first and last line of a node."""
+    first = bisect.bisect_right(source.line_starts, node.start_byte)
+    last = bisect.bisect_right(source.line_starts, max(node.end_byte - 1, node.start_byte))
+    return first, last
+
+
+def _unwrap(node):
+    """The declaration inside an `export ...` or similar wrapper."""
+    if node.type in ("export_statement", "decorated_definition", "template_declaration"):
+        inner = node.child_by_field_name("declaration") or node.child_by_field_name("definition")
+        if inner is None:
+            inner = next((c for c in node.named_children
+                          if not any(word in c.type for word in _ATTACHED)), None)
+        if inner is not None:
+            return inner
+    return node
+
+
+def _name(node, source: _Source) -> str:
+    """What a definition is called, as best the tree says."""
+    found = node.child_by_field_name("name")
+    if found is None:
+        for child in node.named_children:  # const X = ..., Go's type X struct
+            if child.type in ("variable_declarator", "type_spec", "const_spec", "var_spec"):
+                found = child.child_by_field_name("name")
+                break
+    if found is None:  # C/C++: the name hides inside nested declarators
+        declarator = node.child_by_field_name("declarator")
+        while declarator is not None and found is None:
+            if "identifier" in declarator.type:
+                found = declarator
+            declarator = declarator.child_by_field_name("declarator")
+    if found is None:
+        return ""
+    name = " ".join(_text(found, source).split())
+    return name if len(name) <= 80 else ""
+
+
+def _declared_value(node):
+    """The value of `const x = <value>` in JS/TS, else None."""
+    if node.type not in ("lexical_declaration", "variable_declaration"):
+        return None
+    declarator = next((c for c in node.named_children if c.type == "variable_declarator"), None)
+    return declarator.child_by_field_name("value") if declarator is not None else None
+
+
+def _wrapped_function(call):
+    """The function in `wrapper(() => ...)`, as in cache(...) or React.memo(...):
+    a call whose first argument is a function. None otherwise, so a call that
+    merely takes a callback somewhere, like createTable("x", {...}, (t) => ...),
+    doesn't make its result a function."""
+    if call.type != "call_expression":
+        return None
+    args = call.child_by_field_name("arguments")
+    first = args.named_children[0] if args is not None and args.named_child_count else None
+    return first if first is not None and first.type in _FUNCTION_VALUES else None
+
+
+def _kind(node, source: _Source) -> str | None:
+    """What a top-level node defines (function, class, ...), or None for
+    everything else, which stays in the code between definitions."""
+    value = _declared_value(node)
+    if value is not None:
+        if value.type in _FUNCTION_VALUES:
+            return "function"
+        if value.type == "class":
+            return "class"
+        if _wrapped_function(value) is not None:
+            return "function"  # const f = cache(async () => ...), React.memo(...)
+        first, last = _lines_of(node, source)
+        return "declaration" if last - first >= 4 else None  # a big config object or table
+    t = node.type
+    if any(word in t for word in _NOT_DEFINITIONS):
+        return None
+    for word, kind in _KIND_WORDS:
+        if word in t:
+            return kind
+    return None
+
+
+def _body(node):
+    """The node holding what a definition contains (class body, function body,
+    or for `const f = () => {...}` the arrow function's body), or None."""
+    value = _declared_value(node)
+    if value is not None:
+        node = value if value.type in _FUNCTION_VALUES + ("class",) else node
+        node = _wrapped_function(value) or node
+    body = node.child_by_field_name("body")
+    if body is None:
+        body = next((c for c in node.named_children
+                     if c.type.endswith(("body", "block", "declaration_list", "field_declaration_list"))), None)
+    return body if body is not None and body.named_child_count else None
+
+
+def _tree_units(
+    nodes: list, source: _Source, lines: list[str], span: tuple[int, int],
+    parent: str | None, parent_kind: str | None,
+) -> list[tuple[int, int, str, str]]:
+    """(start, end, unit, symbol) for the definitions among `nodes` and the
+    code between them, covering every non-blank line of `span`."""
+    units = []
+    cursor = span[0]
+    gap_unit = "body" if parent else "module"
+
+    def gap(until: int) -> None:
+        trimmed = _trim(lines, cursor, until)
+        # A run of closing brackets (the `}` ending a long class) is noise on its own.
+        if trimmed and not all(_CLOSERS.fullmatch(line) for line in lines[trimmed[0] - 1:trimmed[1]]):
+            units.append((*trimmed, gap_unit, parent or ""))
+
+    for i, node in enumerate(nodes):
+        inner = _unwrap(node)
+        kind = _kind(inner, source)
+        if kind is None:
+            continue
+        start, end = _lines_of(node, source)
+        j = i  # take the comments, decorators and attributes right above it
+        while (j > 0 and any(word in nodes[j - 1].type for word in _ATTACHED)
+               and _lines_of(nodes[j - 1], source)[1] >= start - 1):
+            j -= 1
+            start = _lines_of(nodes[j], source)[0]
+        start = max(start, cursor)
+        if start > end:
+            continue
+        gap(start - 1)
+        name = _name(inner, source)
+        symbol = f"{parent}.{name}" if parent and name else (name or parent or "")
+        if kind == "function" and parent_kind in _CLASS_KINDS:
+            kind = "method"
+        body = _body(inner) if end - start + 1 > MAX_CHUNK_LINES else None
+        if body is not None:
+            units += _tree_units(body.named_children, source, lines, (start, end), symbol or None, kind)
+        else:
+            units.append((start, end, kind, symbol))
+        cursor = end + 1
+    gap(span[1])
+    return units
+
+
+def _tree_sitter_chunks(path: str, text: str, lines: list[str]) -> list[tuple[int, int, str, str]] | None:
+    suffix = os.path.splitext(path)[1].lower()
+    grammar = TREE_SITTER_GRAMMARS.get(suffix)
+    parser = _tree_sitter_parser(grammar) if grammar else None
+    if parser is None:
+        return None
+    # tree-sitter counts lines at "\n" only; skip files where splitlines() would
+    # disagree (a stray form feed or Unicode line separator), rather than misplace chunks.
+    if len(text.replace("\r\n", "\n").split("\n")) - text.endswith(("\n", "\r\n")) != len(lines):
+        return None
+    source = _Source.of(text.encode("utf-8"))
+    try:
+        tree = parser.parse(source.data)
+    except Exception:
+        return None
+    # `tree` stays referenced while its nodes are in use, since they point into it.
+    return _tree_units(tree.root_node.named_children, source, lines, (1, len(lines)), None, None)
+
+
 # ----------------------------------------------------------------- Markdown
 
 
@@ -180,10 +422,13 @@ def chunk_file(path: str, language: str, text: str) -> list[CodeChunk]:
         units = _python_chunks(text, lines)
     elif language == "markdown":
         units = _markdown_chunks(lines)
+    else:
+        units = _tree_sitter_chunks(path, text, lines)
+    structured = units is not None  # split along the file's own structure
     if units is None:
         trimmed = _trim(lines, 1, len(lines))
         units = [(*trimmed, "window", "")] if trimmed else []
-    limit = MAX_CHUNK_LINES if language in ("python", "markdown") else WINDOW_LINES
+    limit = MAX_CHUNK_LINES if structured else WINDOW_LINES
 
     chunks = []
     for start, end, unit, symbol in units:

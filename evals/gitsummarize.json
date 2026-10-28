@@ -1,0 +1,24 @@
+{
+  "description": "Questions about gitsummarize (mostly its Next.js/TypeScript frontend), for comparing how code in languages other than Python is chunked. Expected files were checked against commit 0c6781f. Run: python -m docgen.evaluate evals/gitsummarize.json",
+  "repo": "https://github.com/antarixxx/gitsummarize",
+  "questions": [
+    {"question": "How are Mermaid diagrams rendered on the documentation page?", "files": ["frontend/src/app/[username]/[repo]/page.tsx", "frontend/src/components/mermaid-diagram.tsx"]},
+    {"question": "How is the generated documentation split into sections for the sidebar?", "files": ["frontend/src/app/[username]/[repo]/page.tsx"]},
+    {"question": "How is the table of contents built from the headings?", "files": ["frontend/src/app/[username]/[repo]/page.tsx"]},
+    {"question": "Where does the docs page fetch a repository's README from raw.githubusercontent.com?", "files": ["frontend/src/app/[username]/[repo]/page.tsx"]},
+    {"question": "How does the frontend ask the backend to summarize a repo, and how long can that request take?", "files": ["frontend/src/app/api/generate/route.ts"]},
+    {"question": "Where is the user's Gemini API key stored in the browser?", "files": ["frontend/src/components/api-key-dialog.tsx"]},
+    {"question": "How does a user add a GitHub personal access token for private repositories?", "files": ["frontend/src/components/private-repos-dialog.tsx"]},
+    {"question": "How is a GitHub URL parsed into an owner and a repo name in the frontend?", "files": ["frontend/src/lib/github.ts"]},
+    {"question": "Where are featured repositories loaded from Supabase?", "files": ["frontend/src/lib/supabase.ts"]},
+    {"question": "How are generated diagrams and explanations cached in the database?", "files": ["frontend/src/app/_actions/cache.ts"]},
+    {"question": "What does the diagram cache table look like?", "files": ["frontend/src/server/db/schema.ts"]},
+    {"question": "What messages and steps does the loading screen show while a summary is generated?", "files": ["frontend/src/components/loading.tsx"]},
+    {"question": "How does the home page pick a color for each programming language?", "files": ["frontend/src/app/page.tsx"]},
+    {"question": "How does the home page check whether a repo was already summarized before generating?", "files": ["frontend/src/app/page.tsx"]},
+    {"question": "Which backend endpoint generates a summary, and how is it protected?", "files": ["backend/app.py", "backend/src/gitsummarize/auth/auth.py"]},
+    {"question": "How does the backend download a repository and collect its file contents?", "files": ["backend/src/gitsummarize/clients/github.py"]},
+    {"question": "Which Gemini model writes the business summary?", "files": ["backend/src/gitsummarize/clients/google_genai.py"]},
+    {"question": "How does the backend keep track of several API keys?", "files": ["backend/src/gitsummarize/auth/key_manager.py"]}
+  ]
+}

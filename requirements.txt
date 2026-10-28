@@ -3,6 +3,7 @@ anthropic>=0.40
 fastapi>=0.110
 uvicorn>=0.30
 pathspec>=0.12  # .gitignore / .docgenignore matching
+tree-sitter-language-pack>=1.22  # syntax-aware chunking for languages other than Python
 
 # dev
 pytest>=8.0
