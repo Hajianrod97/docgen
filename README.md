@@ -17,6 +17,7 @@ Next: a documentation hub for whole repos in any language (file, directory and r
 - [x] Hub phase 2: bottom-up summaries (files, directories, overview + diagram) with a cache, from the command line
 - [x] Hub phase 3: Hub tab in the web UI, Markdown export, public GitHub URLs
 - [x] Hub phase 4: search index of every file's chunks and the hub's summaries (for "Ask the repo")
+- [x] Hub phase 5: hybrid search (vector + BM25) and an eval set to measure it
 
 ## Usage
 
@@ -146,6 +147,28 @@ python -m docgen.repo_index path/to/repo --query "how are GitHub repos cloned"
 ```
 
 Only files and summaries whose text changed since the last run are embedded again (`.docgen/repo_index.json` keeps each one's hash). Changing the chunking rules or the embedding model rebuilds the whole index. Run it again after building the hub so the new summaries are included. `--query` prints the closest entries, which is a quick way to see what vector search finds and what it misses.
+
+### Hybrid search
+
+`docgen/search.py` runs two searches and merges them. Vector search matches meaning ("downloaded" finds `git clone`) but is weak on exact names; BM25 keyword search finds `estimate` at once but knows no synonyms. The two rankings are merged with reciprocal rank fusion, which only looks at ranks, so the two kinds of score never need to be made comparable. The web server exposes it at `GET /api/search?repo=...&q=...&mode=hybrid|vector|keyword`.
+
+### Measuring it
+
+`evals/docgen.json` has 20 questions about docgen's own code, each with the files that answer it. Run:
+
+```bash
+python -m docgen.evaluate evals/docgen.json --misses
+```
+
+It updates the index, runs every question through each search mode, and prints the hit rate (the share of questions where a right file is in the top k) and MRR (how high the first right file ranks). On docgen itself, top 5:
+
+| mode | hit rate | MRR |
+|---|---|---|
+| hybrid | 100% | 0.75 |
+| vector | 85% | 0.64 |
+| keyword | 85% | 0.54 |
+
+The questions were written by someone who knew the code, so treat these as optimistic. To evaluate another repo, copy the file, point `"repo"` at it (a path or GitHub URL) and write questions whose answers you know. Then change one thing at a time, such as chunk size or the embedding model, and compare.
 
 ## Which files are read
 

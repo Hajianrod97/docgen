@@ -1,0 +1,26 @@
+{
+  "description": "Questions about docgen's own code, each with the files a good search should find. Run: python -m docgen.evaluate evals/docgen.json",
+  "repo": "..",
+  "questions": [
+    {"question": "How are public GitHub repos cloned and kept up to date?", "files": ["docgen/repos.py"]},
+    {"question": "Where is the cost of a hub build estimated before it runs?", "files": ["docgen/hub.py"]},
+    {"question": "Which files are skipped when walking a repo, like lockfiles and minified bundles?", "files": ["docgen/walker.py"]},
+    {"question": "How are .gitignore patterns applied, including ignore files in subfolders?", "files": ["docgen/walker.py"]},
+    {"question": "How does docgen work out which files import which?", "files": ["docgen/imports.py"]},
+    {"question": "How is a Python file split into chunks for the search index?", "files": ["docgen/chunking.py"]},
+    {"question": "How does the search index decide which files need to be embedded again?", "files": ["docgen/repo_index.py"]},
+    {"question": "Where is the Mermaid diagram checked and repaired?", "files": ["docgen/hub.py"]},
+    {"question": "How is the hub written out as Markdown README files?", "files": ["docgen/hub_export.py"]},
+    {"question": "How does the web UI run a hub build in the background and let the user stop it?", "files": ["docgen/web.py"]},
+    {"question": "What happens when Claude refuses a request or the reply hits the token limit?", "files": ["docgen/generator.py"]},
+    {"question": "How does docgen talk to a local Ollama server?", "files": ["docgen/generator.py"]},
+    {"question": "How are generated docstrings inserted into Python source files?", "files": ["docgen/writer.py"]},
+    {"question": "How does the docstring generator follow the call graph to gather context?", "files": ["docgen/retriever.py"]},
+    {"question": "Where are FastAPI and Flask endpoints detected?", "files": ["docgen/parser.py"]},
+    {"question": "What embedding is used offline in tests instead of the real model?", "files": ["docgen/embeddings.py"]},
+    {"question": "How is a file too long for one prompt split into sections?", "files": ["docgen/hub.py"]},
+    {"question": "Where is the cache key for a directory summary computed?", "files": ["docgen/hub.py"]},
+    {"question": "How are vector search and keyword search results combined?", "files": ["docgen/search.py"]},
+    {"question": "How do I run docgen with a free local model instead of Claude?", "files": ["README.md", "docgen/generator.py"]}
+  ]
+}

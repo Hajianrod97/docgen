@@ -59,6 +59,8 @@ from docgen.parser import parse_repo
 from docgen.repo_index import index_status, update_index
 from docgen.repos import RepoError, RepoSource, resolve_repo
 from docgen.retriever import ContextItem, get_context
+from docgen.search import MODES
+from docgen.search import search as search_repo
 from docgen.walker import walk_repo
 from docgen.writer import ApplyPlan, diff_lines, plan_apply, write_plan
 
@@ -535,6 +537,20 @@ def search_index(req: SearchIndexRequest):
     path = _resolve_repo(req.repo)
     stats = update_index(path, rebuild=req.rebuild)
     return dict(dataclasses.asdict(stats), status=index_status(path))
+
+
+
+@app.get("/api/search")
+def search_endpoint(repo: str, q: str, k: int = 8, mode: str = "hybrid", type: str | None = None):
+    """Hybrid search over the search index; the Ask tab builds on this."""
+    path = _resolve_repo(repo)
+    if mode not in MODES:
+        raise HTTPException(400, f"Unknown search mode {mode!r}; use one of {', '.join(MODES)}")
+    if not index_status(path)["indexed"]:
+        raise HTTPException(400, "No search index yet. Click \"Update search index\" first.")
+    types = (type,) if type else None
+    return {"hits": [dataclasses.asdict(h) | {"citation": h.citation}
+                     for h in search_repo(path, q, k=k, mode=mode, types=types)]}
 
 
 # --------------------------------------------------------------- plan/apply
