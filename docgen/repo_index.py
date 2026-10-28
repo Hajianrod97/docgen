@@ -1,8 +1,7 @@
 """Builds the search index behind "Ask the repo": every file's chunks, plus the hub's summaries.
 
-The index is a ChromaDB collection next to the docstring index, in
-<repo>/.docgen/chroma, but separate from it, so the Python docstring feature
-is unaffected. Each entry has a `type` in its metadata:
+The index is a ChromaDB collection in <repo>/.docgen/chroma. Each entry has
+a `type` in its metadata:
 
 - "code": a chunk of a file, from docgen.chunking. Its metadata has the path
   and line range, which is what answers cite as `file:line`.
@@ -26,13 +25,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+import chromadb
+
 from docgen.chunking import CHUNKER_VERSION, chunk_file
 from docgen.embeddings import get_embedding_function
 from docgen.hub import ROOT, load_hub
-from docgen.indexer import get_client
 from docgen.walker import walk_repo
 
 COLLECTION_NAME = "docgen_repo"
+INDEX_DIRNAME = ".docgen/chroma"
 MANIFEST_FILENAME = ".docgen/repo_index.json"
 INDEX_VERSION = f"{CHUNKER_VERSION}/1"  # chunking rules / document layout
 _BATCH = 128
@@ -68,6 +69,12 @@ def _sha(text: str) -> str:
 def embedding_name() -> str:
     fn = get_embedding_function()
     return fn.name() if fn is not None else "chroma-default:all-MiniLM-L6-v2"
+
+
+def get_client(repo_path: str | Path):
+    path = Path(repo_path).resolve() / INDEX_DIRNAME
+    path.mkdir(parents=True, exist_ok=True)
+    return chromadb.PersistentClient(path=str(path))
 
 
 def manifest_path(repo_path: str | Path) -> Path:

@@ -12,15 +12,15 @@
     {"question": "Where is the Mermaid diagram checked and repaired?", "files": ["docgen/hub.py"]},
     {"question": "How is the hub written out as Markdown README files?", "files": ["docgen/hub_export.py"]},
     {"question": "How does the web UI run a hub build in the background and let the user stop it?", "files": ["docgen/web.py"]},
-    {"question": "What happens when Claude refuses a request or the reply hits the token limit?", "files": ["docgen/generator.py"]},
-    {"question": "How does docgen talk to a local Ollama server?", "files": ["docgen/generator.py"]},
-    {"question": "How are generated docstrings inserted into Python source files?", "files": ["docgen/writer.py"]},
-    {"question": "How does the docstring generator follow the call graph to gather context?", "files": ["docgen/retriever.py"]},
-    {"question": "Where are FastAPI and Flask endpoints detected?", "files": ["docgen/parser.py"]},
+    {"question": "What happens when Claude refuses a request or the reply hits the token limit?", "files": ["docgen/llm.py"]},
+    {"question": "How does docgen talk to a local Ollama server?", "files": ["docgen/llm.py"]},
+    {"question": "How are the citations in an answer checked against the sources?", "files": ["docgen/ask.py"]},
+    {"question": "How is the BM25 keyword score calculated?", "files": ["docgen/search.py"]},
+    {"question": "How is a Markdown file split at its headings for the index?", "files": ["docgen/chunking.py"]},
     {"question": "What embedding is used offline in tests instead of the real model?", "files": ["docgen/embeddings.py"]},
     {"question": "How is a file too long for one prompt split into sections?", "files": ["docgen/hub.py"]},
     {"question": "Where is the cache key for a directory summary computed?", "files": ["docgen/hub.py"]},
     {"question": "How are vector search and keyword search results combined?", "files": ["docgen/search.py"]},
-    {"question": "How do I run docgen with a free local model instead of Claude?", "files": ["README.md", "docgen/generator.py"]}
+    {"question": "How do I run docgen with a free local model instead of Claude?", "files": ["README.md", "docgen/llm.py"]}
   ]
 }

@@ -110,16 +110,6 @@ def test_missing_collection_with_a_manifest_rebuilds(repo):
     assert stats.rebuilt and stats.files_indexed == 8
 
 
-def test_docstring_index_is_left_alone(repo):
-    from docgen.indexer import COLLECTION_NAME, build_index
-    from docgen.parser import parse_repo
-
-    build_index(parse_repo(repo), repo)
-    update_index(repo, rebuild=True)
-    names = {c.name for c in repo_index.get_client(repo).list_collections()}
-    assert {COLLECTION_NAME, repo_index.COLLECTION_NAME} <= names
-
-
 def test_status_reports_what_changed_without_embedding(repo):
     assert index_status(repo)["indexed"] is False
     update_index(repo)

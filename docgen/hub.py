@@ -19,7 +19,7 @@ covers its children's keys, so editing one file redoes that file and the
 directories above it, and nothing else.
 
 The model calls go through the same `complete(system, user) -> str` callables
-as the docstring generator, so everything here can be tested with fakes.
+as Ask (see docgen/llm.py), so everything here can be tested with fakes.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from docgen.generator import (
+from docgen.llm import (
     DEFAULT_OLLAMA_MODEL,
     Completer,
     GenerationError,
@@ -809,7 +809,7 @@ def main(argv: list[str] | None = None) -> int:
     """Build a hub from the command line (the web UI's Hub tab does the same)."""
     import argparse
 
-    from docgen.generator import ProviderError
+    from docgen.llm import ProviderError
     from docgen.hub_export import default_export_dir, export_hub
     from docgen.repos import RepoError, resolve_repo
 

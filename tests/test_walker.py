@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from docgen.parser import parse_repo
 from docgen.walker import MAX_FILE_BYTES, detect_language, walk_repo
 
 MULTILANG = Path(__file__).resolve().parent.parent / "example_multilang"
@@ -134,13 +133,6 @@ def test_file_details(tmp_path):
 ])
 def test_detect_language(name, language):
     assert detect_language(name) == language
-
-
-def test_parse_repo_respects_gitignore(tmp_path):
-    write(tmp_path, ".gitignore", "generated/\n")
-    write(tmp_path, "keep.py", "def kept():\n    pass\n")
-    write(tmp_path, "generated/skip.py", "def skipped():\n    pass\n")
-    assert [c.name for c in parse_repo(tmp_path)] == ["kept"]
 
 
 def test_multilang_sample():

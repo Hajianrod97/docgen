@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from docgen import hub as hubmod
-from docgen.generator import GenerationError, ProviderError, ProviderSetupError
+from docgen.llm import GenerationError, ProviderError, ProviderSetupError
 from docgen.hub import (
     HubModels,
     HubStopped,
@@ -412,7 +412,7 @@ def fake_anthropic(monkeypatch, response):
 
 
 def test_anthropic_completer_sends_effort_and_meters_usage(monkeypatch):
-    from docgen.generator import UsageMeter, make_anthropic_completer
+    from docgen.llm import UsageMeter, make_anthropic_completer
 
     sent = fake_anthropic(monkeypatch, FakeResponse("hi"))
     meter = UsageMeter()
@@ -428,8 +428,8 @@ def test_anthropic_completer_sends_effort_and_meters_usage(monkeypatch):
 
 @pytest.mark.parametrize("stop_reason", ["refusal", "max_tokens"])
 def test_anthropic_completer_rejects_unusable_stops(monkeypatch, stop_reason):
-    from docgen.generator import make_anthropic_completer
+    from docgen.llm import make_anthropic_completer
 
     fake_anthropic(monkeypatch, FakeResponse("partial", stop_reason))
     with pytest.raises(ProviderError):
-        make_anthropic_completer(api_key="k")("sys", "user")
+        make_anthropic_completer("claude-haiku-5-5", api_key="k")("sys", "user")

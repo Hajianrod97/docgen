@@ -1,6 +1,6 @@
 """Walks a repo and decides which files docgen reads.
 
-Every stage (the Python parser, the hub, the index) gets its file list from
+Every stage (the hub, the search index) gets its file list from
 here, so the skip rules live in one place:
 
 - `.gitignore` and `.docgenignore` patterns, including ones in subdirectories

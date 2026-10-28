@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from docgen.generator import (
+from docgen.llm import (
     DEFAULT_OLLAMA_MODEL,
     Completer,
     UsageMeter,
@@ -137,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
     """Ask a question from the command line."""
     import argparse
 
-    from docgen.generator import ProviderError
+    from docgen.llm import ProviderError
     from docgen.repo_index import index_status, update_index
     from docgen.repos import RepoError, resolve_repo
     from docgen.search import MODES

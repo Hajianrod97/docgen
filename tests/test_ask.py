@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from docgen import web
 from docgen.ask import ASK_MODEL, Answer, ask, build_prompt, make_ask_completer, parse_answer
-from docgen.generator import ProviderError, UsageMeter
+from docgen.llm import ProviderError, UsageMeter
 from docgen.repo_index import update_index
 from docgen.search import SearchHit
 from test_hub import MULTILANG
