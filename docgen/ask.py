@@ -32,6 +32,7 @@ from docgen.search import SearchHit, search
 
 ASK_MODEL = "claude-sonnet-5-5"
 DEFAULT_K = 8
+MAX_SUMMARIES = 3  # hub summaries among the sources; the rest are code
 SOURCE_CHARS = 4_000  # one source's text is cut to this
 CONTEXT_CHARS = {"anthropic": 48_000, "ollama": 14_000}  # all sources together
 
@@ -67,6 +68,23 @@ def _clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n[... cut: {len(text) - limit} more characters]"
+
+
+def pick_sources(hits: list[SearchHit], k: int, max_summaries: int = MAX_SUMMARIES) -> list[SearchHit]:
+    """The best k hits, with at most `max_summaries` hub summaries. For a broad
+    question, summaries outrank code (they are written to answer "what does
+    this do?"), and without a cap they can fill every slot, leaving the model
+    nothing to cite lines from."""
+    picked, summaries = [], 0
+    for hit in hits:
+        if hit.type == "summary":
+            if summaries >= max_summaries:
+                continue
+            summaries += 1
+        picked.append(hit)
+        if len(picked) == k:
+            break
+    return picked
 
 
 def build_prompt(question: str, hits: list[SearchHit], budget: int) -> tuple[str, str, list[SearchHit]]:
@@ -123,7 +141,8 @@ def ask(
     budget: int = CONTEXT_CHARS["anthropic"],
 ) -> Answer:
     """Search the index for the question and answer it from what was found."""
-    hits = search(repo_path, question, k=k, mode=mode)
+    # Search deeper than k, so skipped summaries leave room for code.
+    hits = pick_sources(search(repo_path, question, k=2 * k, mode=mode), k)
     if not hits:
         return Answer("The search index is empty, so there is nothing to answer from.", [], model=model)
     system, user, sources = build_prompt(question, hits, budget)

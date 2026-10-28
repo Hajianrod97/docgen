@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from test_hub import MULTILANG
 
 from docgen import web
-from docgen.ask import ASK_MODEL, Answer, ask, build_prompt, make_ask_completer, parse_answer
+from docgen.ask import ASK_MODEL, Answer, ask, build_prompt, make_ask_completer, parse_answer, pick_sources
 from docgen.llm import ProviderError, UsageMeter
 from docgen.repo_index import update_index
 from docgen.search import SearchHit
@@ -74,6 +74,15 @@ def test_prompt_stops_adding_sources_at_the_budget_but_keeps_the_first():
     _, user, used = build_prompt("q", [hit(1, big), hit(2, big), hit(3)], 5_000)
     assert len(used) == 1
     assert "more characters]" in user  # the first source was cut to SOURCE_CHARS
+
+
+def test_pick_sources_caps_summaries_and_fills_with_code():
+    summaries = [hit(n, type="summary", start_line=None, end_line=None) for n in range(1, 6)]
+    code = [hit(n) for n in range(6, 10)]
+    picked = pick_sources(summaries + code, k=6, max_summaries=3)
+    assert [h.type for h in picked] == ["summary"] * 3 + ["code"] * 3
+    assert picked[:3] == summaries[:3]  # the best summaries are the ones kept
+    assert pick_sources(code, k=2) == code[:2]
 
 
 def test_make_ask_completer_defaults(monkeypatch):

@@ -34,14 +34,29 @@ import bisect
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
-CHUNKER_VERSION = "2"  # bump when the rules change, so the index is rebuilt
+CHUNKER_VERSION = "3"  # bump when the rules change, so the index is rebuilt
 
 WINDOW_LINES = 60
 WINDOW_OVERLAP = 10
 MAX_CHUNK_LINES = 120
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+_CAMEL_PART = re.compile(r"[A-Za-z][a-z0-9]*|[A-Z]+(?![a-z])|\d+")
+
+
+def identifier_words(*names: str) -> list[str]:
+    """The plain words inside identifiers, when there are any to find:
+    `make_hub_models` and `hubExport` give make, hub, models, export.
+    Single-word names give nothing, since they are already plain words."""
+    words = []
+    for name in names:
+        for ident in re.findall(r"[A-Za-z0-9_]+", name):
+            parts = [p.lower() for p in _CAMEL_PART.findall(ident)]
+            if len(parts) > 1:
+                words += parts
+    return list(dict.fromkeys(words))
 
 
 @dataclass
@@ -59,9 +74,15 @@ class CodeChunk:
         return f"code:{self.path}:{self.start_line}-{self.end_line}"
 
     def embedding_text(self) -> str:
-        """What gets embedded: a header naming where the chunk is, then its text."""
+        """What gets embedded: a header naming where the chunk is, then its text.
+        The header spells out the words in the chunk's name and file name, so
+        a question in plain words ("hub models") matches `make_hub_models` in
+        any search, not only one whose tokenizer splits identifiers."""
         where = f"{self.path} lines {self.start_line}-{self.end_line} ({self.language})"
         label = f"{self.unit} {self.symbol}" if self.symbol else self.unit
+        words = identifier_words(self.symbol, Path(self.path).stem) if self.unit != "section" else []
+        if words:
+            label += f" ({' '.join(words)})"
         return f"File: {where}\n{label}\n\n{self.text}"
 
 

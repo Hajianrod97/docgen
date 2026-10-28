@@ -95,6 +95,10 @@ The embedding model is all-MiniLM-L6-v2, run locally by ChromaDB and downloaded 
 
 `docgen/search.py` runs two searches and merges them. Vector search matches meaning ("downloaded" finds `git clone`) but is weak on exact names; BM25 keyword search finds `estimate` at once but knows no synonyms. The two rankings are merged with reciprocal rank fusion, which only looks at ranks, so the two kinds of score never need to be made comparable. `HYBRID_ALPHA` weights the two lists (0.5, the default, is plain RRF; 1.0 is vector only); see below for why it stays at 0.5. The web server exposes it at `GET /api/search?repo=...&q=...&mode=hybrid|vector|keyword`.
 
+The vector half goes through LangChain's Chroma vector store (`langchain-chroma`), and BM25 scoring comes from [bm25s](https://github.com/xhluca/bm25s), fed by docgen's own tokenizer, which splits identifiers so `make_hub_models` also matches "hub models". Fusion is docgen's own `rrf()`. `RepoRetriever` wraps the whole search as a LangChain retriever (`RepoRetriever(repo_path=...).invoke(question)` returns `Document`s with the citation in their metadata), for LangChain code such as a LangGraph agent. An earlier version used its own BM25 class; LangChain's `BM25Retriever` and `EnsembleRetriever` were considered, but they live in `langchain-community`, which LangChain sunset in May 2026, and `langchain-classic`. Swapping the BM25 class for bm25s left gitsummarize's scores unchanged in every mode.
+
+Each chunk's header also spells out the words inside its name and file name (`function make_hub_models (make hub models)`), for searches whose tokenizer doesn't split identifiers. With docgen's own tokenizer it changed nothing beyond noise (within one or two questions either way).
+
 ### Measuring it
 
 There are two question sets: `evals/docgen.json`, 52 questions about docgen's own code, and `evals/gitsummarize.json`, 48 questions about [gitsummarize](https://github.com/antarixxx/gitsummarize), a Python backend with a TypeScript frontend. Each question lists the files that answer it and, more precisely, the chunks: a path plus a piece of text the right chunk contains, such as `docgen/hub.py :: def _tiny_description`. Run:
@@ -148,7 +152,7 @@ The questions were written by someone who knew the code, so treat these as optim
 
 ## Asking questions
 
-The **Ask** tab answers questions about the repo. The question goes through hybrid search; the best results (8 by default) go into the prompt as numbered sources, and the model is told to answer only from them and to cite each claim like `[2]`. Each citation becomes a link such as `store.py:12-30`; clicking it opens that file in the Hub with the cited lines shown. **Retrieved sources** lists everything search found, which ones were cited, and each one's rank in the vector and keyword halves, so you can see why an answer was good or bad: usually the right code either was or wasn't retrieved.
+The **Ask** tab answers questions about the repo. The question goes through hybrid search; the best results (8 by default, at most 3 of them hub summaries, so broad questions still get code to cite) go into the prompt as numbered sources, and the model is told to answer only from them and to cite each claim like `[2]`. Each citation becomes a link such as `store.py:12-30`; clicking it opens that file in the Hub with the cited lines shown. **Retrieved sources** lists everything search found, which ones were cited, and each one's rank in the vector and keyword halves, so you can see why an answer was good or bad: usually the right code either was or wasn't retrieved.
 
 The search index is updated before each question (quick when little changed), but it has to exist first: click **Update search index** in the Hub tab once. The default model is `claude-sonnet-5-5`; a question costs a few cents, shown under the answer. With Ollama it's free, with a smaller prompt to fit the local model's context.
 
@@ -204,7 +208,7 @@ Styled as a plain dark dev-tool (GitHub Dark-style grays and blue), and self-con
 ## Known limitations
 
 - The Ollama client has been run against a real server (qwen2.5-coder:7b and nomic-embed-text), which is where the measurements above come from. The Anthropic client has only been tested against a fake that follows the documented protocol, since no API key was available. Build the hub for a small repo and ask a couple of questions first, and read the output, before using it at scale.
-- With a 7B local model, Ask often leaves out citations, the hub summaries can crowd code out of the sources for broad questions, and an answer takes 18–40 seconds.
+- With a 7B local model, Ask often leaves out citations, and an answer takes 18–40 seconds.
 - Summaries and answers describe only what the model was shown, and can still be wrong. Answers cite their sources so you can check them; summaries don't.
 - Imports are found with patterns for Python and JavaScript/TypeScript only. Files in other languages get their folder neighbors as context instead.
 - The embedding model reads only the first 256 word pieces of a chunk, so the end of a long chunk is barely searchable.

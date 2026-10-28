@@ -2,13 +2,16 @@
 
 The two halves fail differently, which is why both are used:
 
-- Vector search (ChromaDB, all-MiniLM-L6-v2 by default) matches meaning, so
+- Vector search (ChromaDB through LangChain's Chroma vector store,
+  all-MiniLM-L6-v2 by default) matches meaning, so
   "how are repos downloaded" can find code that says `git clone`. It is weak
   on exact names: a question about "the cost estimate" may not find a method
   called `estimate`.
 - BM25 matches words, weighted so rare words count more than common ones and
   a word repeated in a long chunk counts less than in a short one. It finds
-  `estimate` at once but knows nothing about synonyms.
+  `estimate` at once but knows nothing about synonyms. The scoring is the
+  bm25s library's; the words it scores come from `tokenize` below, which
+  splits identifiers.
 
 Their rankings are merged with reciprocal rank fusion (RRF): each result
 scores 1 / (RRF_K + rank) in every list it appears in, and the scores are
@@ -21,18 +24,28 @@ the keyword list: 0.5 is plain RRF, 1.0 is vector only, 0.0 keyword only.
 
 The BM25 index is built in memory from the documents already stored in
 ChromaDB, and rebuilt whenever the index's manifest changes.
+
+`RepoRetriever` offers the same search as a LangChain retriever, for code
+built on LangChain (such as a LangGraph agent).
 """
 
 from __future__ import annotations
 
-import math
+import dataclasses
 import re
 import threading
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from docgen.repo_index import manifest_path, open_repo_collection
+import bm25s
+import numpy as np
+from langchain_chroma import Chroma
+from langchain_core.callbacks import CallbackManagerForRetrieverRun
+from langchain_core.documents import Document
+from langchain_core.retrievers import BaseRetriever
+
+from docgen.embeddings import LangChainEmbeddings
+from docgen.repo_index import COLLECTION_NAME, get_client, manifest_path, open_repo_collection
 
 RRF_K = 60  # the usual constant; larger values flatten the difference between ranks
 HYBRID_ALPHA = 0.5  # weight of the vector list in hybrid fusion (0.5 = plain RRF)
@@ -67,30 +80,21 @@ def tokenize(text: str) -> list[str]:
     return [_stem(t) for t in tokens if t not in _STOPWORDS]
 
 
-class BM25:
-    """Okapi BM25 over pre-tokenized documents."""
+def keyword_index(docs: list[list[str]]) -> bm25s.BM25:
+    """A BM25 index over tokenized documents. "lucene" scoring uses the
+    "+1" form of IDF, which never goes negative even for very common words."""
+    index = bm25s.BM25(method="lucene")
+    index.index(docs, show_progress=False)
+    return index
 
-    def __init__(self, docs: list[list[str]], k1: float = 1.5, b: float = 0.75):
-        self.k1, self.b = k1, b
-        self.counts = [Counter(d) for d in docs]
-        self.lengths = [len(d) for d in docs]
-        self.avg_length = (sum(self.lengths) / len(docs)) if docs else 0.0
-        df = Counter(term for c in self.counts for term in c)
-        n = len(docs)
-        # The "+1" form of IDF never goes negative, even for very common words.
-        self.idf = {term: math.log(1 + (n - f + 0.5) / (f + 0.5)) for term, f in df.items()}
 
-    def scores(self, query: list[str]) -> list[float]:
-        out = []
-        for counts, length in zip(self.counts, self.lengths, strict=True):
-            score = 0.0
-            norm = self.k1 * (1 - self.b + self.b * length / (self.avg_length or 1))
-            for term in set(query):
-                tf = counts.get(term)
-                if tf:
-                    score += self.idf[term] * tf * (self.k1 + 1) / (tf + norm)
-            out.append(score)
-        return out
+def keyword_scores(index: bm25s.BM25, query: list[str]) -> np.ndarray:
+    """BM25 score of every document for the query's words. A repeated query
+    word counts once, and a query with no words left scores everything 0."""
+    words = list(dict.fromkeys(query))
+    if not words:
+        return np.zeros(index.scores["num_docs"])
+    return index.get_scores(words)
 
 
 def rrf(rankings: list[list[str]], k: int = RRF_K,
@@ -124,14 +128,16 @@ class SearchHit:
 
 
 class _Corpus:
-    """Everything in the index, plus a BM25 index over it."""
+    """Everything in the index, a BM25 index over it, and the vector store."""
 
-    def __init__(self, collection):
+    def __init__(self, repo: Path, collection):
         got = collection.get(include=["documents", "metadatas"])
         self.ids = got["ids"]
         self.documents = dict(zip(got["ids"], got["documents"], strict=True))
         self.metadatas = dict(zip(got["ids"], got["metadatas"], strict=True))
-        self.bm25 = BM25([tokenize(d) for d in got["documents"]])
+        self.bm25 = keyword_index([tokenize(d) for d in got["documents"]]) if self.ids else None
+        self.vectors = Chroma(client=get_client(repo), collection_name=COLLECTION_NAME,
+                              embedding_function=LangChainEmbeddings(), create_collection_if_not_exists=False)
 
 
 _corpora: dict[str, tuple[tuple, _Corpus]] = {}
@@ -146,7 +152,7 @@ def _corpus(repo: Path, collection) -> _Corpus:
         cached = _corpora.get(str(repo))
         if cached and cached[0] == stamp:
             return cached[1]
-    corpus = _Corpus(collection)
+    corpus = _Corpus(repo, collection)
     with _corpora_lock:
         _corpora[str(repo)] = (stamp, corpus)
     return corpus
@@ -183,12 +189,12 @@ def search(repo_path: str | Path, query: str, k: int = 8, mode: str = "hybrid",
         where = {"type": {"$in": list(types)}} if types else None
         # Ask for extra so excluded entries don't leave the list short.
         n = min(CANDIDATES + 10 * len(exclude_paths), len(corpus.ids))
-        result = collection.query(query_texts=[query], n_results=n, where=where)
-        vector = [i for i in result["ids"][0] if allowed(i)][:CANDIDATES]
+        found = corpus.vectors.similarity_search_with_score(query, k=n, filter=where)
+        vector = [doc.id for doc, _ in found if allowed(doc.id)][:CANDIDATES]
 
     keyword: list[str] = []
     if mode in ("hybrid", "keyword"):
-        scores = corpus.bm25.scores(tokenize(query))
+        scores = keyword_scores(corpus.bm25, tokenize(query))
         ranked = sorted(range(len(scores)), key=lambda i: -scores[i])
         keyword = [corpus.ids[i] for i in ranked if scores[i] > 0 and allowed(corpus.ids[i])][:CANDIDATES]
 
@@ -215,3 +221,22 @@ def search(repo_path: str | Path, query: str, k: int = 8, mode: str = "hybrid",
             keyword_rank=keyword_rank.get(doc_id),
         ))
     return hits
+
+
+class RepoRetriever(BaseRetriever):
+    """`search` as a LangChain retriever. Each Document is one hit: its text,
+    with the rest of the hit (path, lines, citation, ranks) as metadata."""
+
+    repo_path: str
+    k: int = 8
+    mode: str = "hybrid"
+    types: tuple[str, ...] | None = None
+    alpha: float = HYBRID_ALPHA
+
+    def _get_relevant_documents(self, query: str, *,
+                                run_manager: CallbackManagerForRetrieverRun) -> list[Document]:
+        hits = search(self.repo_path, query, k=self.k, mode=self.mode, types=self.types, alpha=self.alpha)
+        return [Document(page_content=h.text, id=h.id,
+                         metadata={k: v for k, v in dataclasses.asdict(h).items() if k != "text"}
+                         | {"citation": h.citation})
+                for h in hits]

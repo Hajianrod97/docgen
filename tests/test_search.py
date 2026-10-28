@@ -15,7 +15,7 @@ from docgen.evaluate import evaluate, load_eval, parse_chunk_label
 from docgen.evaluate import main as eval_main
 from docgen.hub import build_hub
 from docgen.repo_index import update_index
-from docgen.search import BM25, rrf, search, tokenize
+from docgen.search import RepoRetriever, keyword_index, keyword_scores, rrf, search, tokenize
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -50,16 +50,22 @@ def test_stemming_matches_word_forms():
 
 def test_bm25_prefers_rare_words_and_short_documents():
     docs = [["the", "store", "task"], ["the", "api", "client"], ["the"] * 20 + ["store"]]
-    bm25 = BM25(docs)
-    scores = bm25.scores(["store"])
+    index = keyword_index(docs)
+    scores = keyword_scores(index, ["store"])
     assert scores[0] > scores[2] > 0 and scores[1] == 0  # same term, shorter doc wins
-    assert bm25.idf["the"] < bm25.idf["store"] < bm25.idf["api"]
-    assert all(v > 0 for v in bm25.idf.values())  # never negative
+    # A word in every document still scores above zero ("+1" IDF), but less than a rare one.
+    assert 0 < keyword_scores(index, ["the"])[1] < keyword_scores(index, ["api"])[1]
 
 
 def test_bm25_counts_a_repeated_query_word_once():
-    bm25 = BM25([["store"], ["api"]])
-    assert bm25.scores(["store", "store"]) == bm25.scores(["store"])
+    index = keyword_index([["store"], ["api"]])
+    assert list(keyword_scores(index, ["store", "store"])) == list(keyword_scores(index, ["store"]))
+
+
+def test_bm25_scores_a_query_with_no_words_as_zero():
+    index = keyword_index([["store"], ["api"]])
+    assert list(keyword_scores(index, [])) == [0, 0]
+    assert list(keyword_scores(index, ["zebra"])) == [0, 0]
 
 
 def test_rrf_rewards_agreement_between_rankings():
@@ -227,6 +233,21 @@ def test_web_search_needs_an_index(tmp_path):
     (tmp_path / "a.py").write_text("x = 1\n")
     r = TestClient(web.app).get("/api/search", params={"repo": str(tmp_path), "q": "x"})
     assert r.status_code == 400 and "search index" in r.json()["detail"]
+
+
+def test_a_question_of_only_stopwords_still_gets_vector_results(repo):
+    hits = search(repo, "how is it?", k=3)
+    assert hits and all(h.keyword_rank is None for h in hits)
+
+
+def test_repo_retriever_returns_documents_with_citations(repo):
+    docs = RepoRetriever(repo_path=str(repo), k=3).invoke("TaskStore add task")
+    assert len(docs) == 3
+    first = docs[0]
+    assert first.metadata["path"] == "backend/store.py"
+    assert first.metadata["citation"].startswith("backend/store.py:")
+    assert "text" not in first.metadata and "class TaskStore" in first.page_content
+    assert first.id == search(repo, "TaskStore add task", k=3)[0].id
 
 
 def test_corpus_cache_is_per_repo(repo, tmp_path):

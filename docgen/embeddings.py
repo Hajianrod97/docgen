@@ -25,6 +25,7 @@ import urllib.error
 import urllib.request
 
 from chromadb import Documents, EmbeddingFunction, Embeddings
+from langchain_core.embeddings import Embeddings as LCEmbeddings
 
 _TOKEN_RE = re.compile(r"[A-Za-z][a-z0-9]*|[A-Z]+(?![a-z])|\d+")
 
@@ -149,3 +150,25 @@ def get_embedding_function():
         model = choice.split(":", 1)[1] if ":" in choice else DEFAULT_OLLAMA_EMBED_MODEL
         return OllamaEmbedding(model=model)
     return None
+
+
+class LangChainEmbeddings(LCEmbeddings):
+    """The configured embedding function behind LangChain's Embeddings
+    interface, so LangChain vector stores embed questions with the same model
+    (and query prefix) the index was built with."""
+
+    def __init__(self, fn=None):
+        if fn is None:
+            fn = get_embedding_function()
+        if fn is None:
+            from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+
+            fn = DefaultEmbeddingFunction()
+        self.fn = fn
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [[float(x) for x in v] for v in self.fn(texts)]
+
+    def embed_query(self, text: str) -> list[float]:
+        embed = getattr(self.fn, "embed_query", self.fn)
+        return [float(x) for x in embed([text])[0]]
