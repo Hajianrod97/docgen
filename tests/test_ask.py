@@ -161,6 +161,15 @@ def test_web_ask_returns_answer_sources_and_citations(client, repo):
     assert "vector_rank" in first and "keyword_rank" in first
 
 
+def test_web_ask_agentic_mode_returns_its_steps(client, repo, monkeypatch):
+    monkeypatch.setenv("DOCGEN_RERANKER", "hash")
+    data = post(client, repo, agent=True).json()
+    assert data["answer"].startswith("Tasks live in") and data["cited"]
+    assert data["steps"] and data["steps"][0].startswith("retrieve")
+    assert data["sources"][0]["rerank_score"] is not None
+    assert post(client, repo).json()["steps"] == []  # Quick mode takes no steps worth listing
+
+
 def test_web_ask_updates_the_index_first(client, repo):
     (repo / "backend" / "zoo.py").write_text("def zebrafish_feeder():\n    return 'TaskStore'\n")
     data = post(client, repo, question="zebrafish feeder", mode="keyword").json()

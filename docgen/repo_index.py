@@ -1,8 +1,8 @@
 """Builds the search index behind "Ask the repo": every file's chunks, plus the hub's summaries.
 
-Each entry is a piece of text, its metadata and its embedding vector. For now
-they are kept in files in <repo>/.docgen/index (see `LocalStore`), a stand-in
-until the index moves to Postgres. Each entry has a `type` in its metadata:
+Each entry is a piece of text, its metadata and its embedding vector, stored
+as a row of the repo's table in Postgres (see docgen.store). Each entry has a
+`type` in its metadata:
 
 - "code": a chunk of a file, from docgen.chunking. Its metadata has the path
   and line range, which is what answers cite as `file:line`.
@@ -10,8 +10,8 @@ until the index moves to Postgres. Each entry has a `type` in its metadata:
   split at its headings. Summaries answer "what is this for" questions well,
   since they say in plain words what the code only implies.
 
-Updates are incremental. <repo>/.docgen/repo_index.json records each file's
-content hash and the ids of its chunks; a run re-chunks and re-embeds only
+Updates are incremental. The repo's manifest (in Postgres, next to its table)
+records each file's content hash and the ids of its chunks; a run re-chunks and re-embeds only
 files whose hash changed, deletes the chunks of removed files, and does the
 same for summaries. Changing the chunking rules or the embedding model
 rebuilds everything, since vectors from different models can't be mixed.
@@ -20,21 +20,17 @@ rebuilds everything, since vectors from different models can't be mixed.
 from __future__ import annotations
 
 import hashlib
-import json
 import posixpath
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import numpy as np
-
 from docgen.chunking import CHUNKER_VERSION, chunk_file
 from docgen.embeddings import get_embedding_function
 from docgen.hub import ROOT, load_hub
+from docgen.store import PostgresStore, load_manifest
 from docgen.walker import walk_repo
 
-INDEX_DIRNAME = ".docgen/index"
-MANIFEST_FILENAME = ".docgen/repo_index.json"
 INDEX_VERSION = f"{CHUNKER_VERSION}/1"  # chunking rules / document layout
 _BATCH = 128
 
@@ -70,27 +66,8 @@ def embedding_name() -> str:
     return get_embedding_function().docgen_id
 
 
-def manifest_path(repo_path: str | Path) -> Path:
-    return Path(repo_path).resolve() / MANIFEST_FILENAME
-
-
 def _empty_manifest() -> dict:
     return {"version": INDEX_VERSION, "embedding": embedding_name(), "files": {}, "summaries": {}}
-
-
-def load_manifest(repo_path: str | Path) -> dict | None:
-    path = manifest_path(repo_path)
-    if not path.exists():
-        return None
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _save_manifest(repo_path: str | Path, manifest: dict) -> None:
-    path = manifest_path(repo_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(path)
 
 
 # ---------------------------------------------------------------- documents
@@ -176,84 +153,6 @@ def _all_dirs(paths) -> set[str]:
     return dirs
 
 
-@dataclass
-class StoredIndex:
-    """Everything in the index, in one order: ids, texts, metadata, and one
-    row of `vectors` per entry, scaled to length 1."""
-
-    ids: list[str]
-    texts: list[str]
-    metadatas: list[dict]
-    vectors: np.ndarray
-
-
-def _index_dir(repo: Path) -> Path:
-    return Path(repo).resolve() / INDEX_DIRNAME
-
-
-def load_index(repo_path: str | Path) -> StoredIndex:
-    """Read the stored index (raises FileNotFoundError if it hasn't been built)."""
-    folder = _index_dir(Path(repo_path))
-    rows = json.loads((folder / "entries.json").read_text(encoding="utf-8"))
-    vectors = np.load(folder / "vectors.npy")
-    if len(vectors):
-        vectors = vectors / np.maximum(np.linalg.norm(vectors, axis=1, keepdims=True), 1e-12)
-    return StoredIndex([r["id"] for r in rows], [r["text"] for r in rows],
-                       [r["metadata"] for r in rows], vectors)
-
-
-class LocalStore:
-    """A stand-in index until it moves to Postgres: each entry's text and
-    metadata in <repo>/.docgen/index/entries.json, and its vector in the same
-    row of vectors.npy. Every change rewrites both files, which is fine for
-    one repo at a time and nothing more."""
-
-    def __init__(self, repo: Path):
-        self.repo = Path(repo).resolve()
-        self.folder = _index_dir(self.repo)
-        self.embeddings = get_embedding_function()
-        self.entries: dict[str, tuple[str, dict, list[float]]] = {}
-
-    def exists(self) -> bool:
-        return (self.folder / "entries.json").exists()
-
-    def prepare(self, reset: bool) -> None:
-        self.entries = {}
-        if reset or not self.exists():
-            self._save()
-            return
-        stored = load_index(self.repo)
-        for i, doc_id in enumerate(stored.ids):
-            self.entries[doc_id] = (stored.texts[i], stored.metadatas[i], stored.vectors[i].tolist())
-
-    def delete(self, ids: list[str]) -> None:
-        for doc_id in ids:
-            self.entries.pop(doc_id, None)
-        self._save()
-
-    def upsert(self, entries: list[Entry]) -> None:
-        vectors = self.embeddings.embed_documents([e.text for e in entries])
-        for e, vector in zip(entries, vectors, strict=True):
-            self.entries[e.id] = (e.text, e.metadata, vector)
-        self._save()
-
-    def count(self) -> int:
-        return len(self.entries)
-
-    def _save(self) -> None:
-        """Vectors first, then entries.json, each swapped in whole, so the
-        entries file never lists more rows than the vectors file holds."""
-        self.folder.mkdir(parents=True, exist_ok=True)
-        rows = [{"id": i, "text": t, "metadata": m} for i, (t, m, _) in self.entries.items()]
-        vectors = np.array([v for *_, v in self.entries.values()], dtype=np.float32)
-        with open(self.folder / "vectors.tmp.npy", "wb") as f:
-            np.save(f, vectors)
-        (self.folder / "vectors.tmp.npy").replace(self.folder / "vectors.npy")
-        tmp = self.folder / "entries.tmp.json"
-        tmp.write_text(json.dumps(rows), encoding="utf-8")
-        tmp.replace(self.folder / "entries.json")
-
-
 ProgressFn = Callable[[int, int], None]  # (entries embedded so far, entries to embed)
 
 
@@ -267,95 +166,96 @@ def update_index(repo_path: str | Path, on_progress: ProgressFn | None = None,
     languages = {f.path: f.language for f in walked.files}
     dirs = _all_dirs(texts)
 
-    store = LocalStore(repo)
-    manifest = load_manifest(repo)
-    reset = (
-        rebuild or manifest is None
-        or manifest.get("version") != INDEX_VERSION
-        or manifest.get("embedding") != embedding_name()
-        or not store.exists()
-    )
-    if reset:
-        stats.rebuilt = manifest is not None or rebuild
-        manifest = _empty_manifest()
-    store.prepare(reset)
+    with PostgresStore(repo) as store:
+        manifest = store.load_manifest()
+        reset = (
+            rebuild or manifest is None
+            or manifest.get("version") != INDEX_VERSION
+            or manifest.get("embedding") != embedding_name()
+            or not store.exists()
+        )
+        if reset:
+            stats.rebuilt = manifest is not None or rebuild
+            manifest = _empty_manifest()
+        store.prepare(reset)
 
-    # Work out what changed.
-    stale_ids: list[str] = []
-    to_add: list[tuple[str, str, str, list[Entry]]] = []  # (manifest section, key, hash, entries)
-    for path, record in list(manifest["files"].items()):
-        if path not in texts:
-            stale_ids += record["ids"]
-            del manifest["files"][path]
-            stats.files_removed += 1
-    for path, text in texts.items():
-        digest = _sha(text)
-        record = manifest["files"].get(path)
-        if record and record["hash"] == digest:
-            stats.files_unchanged += 1
-            continue
-        if record:
-            stale_ids += record["ids"]
-        to_add.append(("files", path, digest, code_entries(path, languages[path], text)))
-        stats.files_indexed += 1
+        # Work out what changed.
+        stale_ids: list[str] = []
+        to_add: list[tuple[str, str, str, list[Entry]]] = []  # (manifest section, key, hash, entries)
+        for path, record in list(manifest["files"].items()):
+            if path not in texts:
+                stale_ids += record["ids"]
+                del manifest["files"][path]
+                stats.files_removed += 1
+        for path, text in texts.items():
+            digest = _sha(text)
+            record = manifest["files"].get(path)
+            if record and record["hash"] == digest:
+                stats.files_unchanged += 1
+                continue
+            if record:
+                stale_ids += record["ids"]
+            to_add.append(("files", path, digest, code_entries(path, languages[path], text)))
+            stats.files_indexed += 1
 
-    sources = summary_sources(load_hub(repo), set(texts), dirs)
-    for source_id, record in list(manifest["summaries"].items()):
-        if source_id not in sources:
-            stale_ids += record["ids"]
-            del manifest["summaries"][source_id]
-            stats.summaries_removed += 1
-    for source_id, (level, path, text) in sources.items():
-        digest = _sha(text)
-        record = manifest["summaries"].get(source_id)
-        if record and record["hash"] == digest:
-            continue
-        if record:
-            stale_ids += record["ids"]
-        to_add.append(("summaries", source_id, digest, summary_entries(source_id, level, path, text)))
-        stats.summaries_indexed += 1
+        sources = summary_sources(load_hub(repo), set(texts), dirs)
+        for source_id, record in list(manifest["summaries"].items()):
+            if source_id not in sources:
+                stale_ids += record["ids"]
+                del manifest["summaries"][source_id]
+                stats.summaries_removed += 1
+        for source_id, (level, path, text) in sources.items():
+            digest = _sha(text)
+            record = manifest["summaries"].get(source_id)
+            if record and record["hash"] == digest:
+                continue
+            if record:
+                stale_ids += record["ids"]
+            to_add.append(("summaries", source_id, digest, summary_entries(source_id, level, path, text)))
+            stats.summaries_indexed += 1
 
-    # Apply: deletions first, then additions, saving the manifest as we go so
-    # an interrupted run only redoes what wasn't recorded.
-    for i in range(0, len(stale_ids), _BATCH):
-        store.delete(stale_ids[i:i + _BATCH])
-    stats.entries_removed = len(stale_ids)
-    _save_manifest(repo, manifest)
+        # Apply: deletions first, then additions. Each batch is committed with the
+        # manifest entries that list it, so an interrupted run only redoes what
+        # wasn't saved.
+        for i in range(0, len(stale_ids), _BATCH):
+            store.delete(stale_ids[i:i + _BATCH])
+        stats.entries_removed = len(stale_ids)
+        store.save_manifest(manifest)
 
-    total = sum(len(entries) for *_, entries in to_add)
-    done = 0
-    pending: list[Entry] = []
-    pending_records: list[tuple[str, str, str, list[str]]] = []
+        total = sum(len(entries) for *_, entries in to_add)
+        done = 0
+        pending: list[Entry] = []
+        pending_records: list[tuple[str, str, str, list[str]]] = []
 
-    def flush() -> None:
-        nonlocal done
-        if pending:
-            store.upsert(list(pending))
-            done += len(pending)
-        for section, key, digest, ids in pending_records:
-            manifest[section][key] = {"hash": digest, "ids": ids}
-        _save_manifest(repo, manifest)
-        pending.clear()
-        pending_records.clear()
-        if on_progress:
-            on_progress(done, total)
+        def flush() -> None:
+            nonlocal done
+            if pending:
+                store.upsert(list(pending))
+                done += len(pending)
+            for section, key, digest, ids in pending_records:
+                manifest[section][key] = {"hash": digest, "ids": ids}
+            store.save_manifest(manifest)
+            pending.clear()
+            pending_records.clear()
+            if on_progress:
+                on_progress(done, total)
 
-    for section, key, digest, entries in to_add:
-        pending.extend(entries)
-        pending_records.append((section, key, digest, [e.id for e in entries]))
-        if len(pending) >= _BATCH:
-            flush()
-    flush()
+        for section, key, digest, entries in to_add:
+            pending.extend(entries)
+            pending_records.append((section, key, digest, [e.id for e in entries]))
+            if len(pending) >= _BATCH:
+                flush()
+        flush()
 
-    stats.entries_added = total
-    stats.total_entries = store.count()
-    counts = {"code": 0, "summary": 0}
-    for record in manifest["files"].values():
-        counts["code"] += len(record["ids"])
-    for record in manifest["summaries"].values():
-        counts["summary"] += len(record["ids"])
-    stats.by_type = counts
-    return stats
+        stats.entries_added = total
+        stats.total_entries = store.count()
+        counts = {"code": 0, "summary": 0}
+        for record in manifest["files"].values():
+            counts["code"] += len(record["ids"])
+        for record in manifest["summaries"].values():
+            counts["summary"] += len(record["ids"])
+        stats.by_type = counts
+        return stats
 
 
 def index_status(repo_path: str | Path) -> dict:

@@ -264,6 +264,12 @@
         <select id="askK"><option>5</option><option selected>8</option><option>12</option></select>
       </div>
       <div class="field">
+        <label>Mode</label>
+        <select id="askAgent" onchange="$('askMode').disabled = this.value === 'agent'">
+          <option value="quick">Quick</option><option value="agent">Agentic</option>
+        </select>
+      </div>
+      <div class="field">
         <label>Search</label>
         <select id="askMode">
           <option value="hybrid">hybrid</option><option value="vector">vector only</option><option value="keyword">keyword only</option>
@@ -274,8 +280,9 @@
         <button class="primary" onclick="askRepo()" id="askBtn">Ask</button>
       </div>
     </div>
-    <div class="hint">The question is searched for in the search index, and the model answers only from the sources found, citing them. Click a citation to see those lines in the Hub. Each question is answered on its own. Cmd/Ctrl+Enter asks.</div>
+    <div class="hint">The question is searched for in the search index, and the model answers only from the sources found, citing them. Click a citation to see those lines in the Hub. Each question is answered on its own. Cmd/Ctrl+Enter asks. <b>Agentic</b> reranks the sources, searches again with a rewritten query when nothing relevant turns up, and retries an answer that cites nothing; it is slower and can make more model calls.</div>
     <div class="status" id="askStatus"></div>
+    <ol class="hint" id="askSteps" style="display:none"></ol>
     <div class="answer markdown-body" id="askAnswer"></div>
     <details id="askSourcesBox" style="display:none;margin-top:1rem">
       <summary id="askSourcesTitle">Retrieved sources</summary>
@@ -757,6 +764,7 @@ async function askRepo() {
   status.textContent = 'Searching the index and asking the model...'; status.className = 'status';
   $('askAnswer').innerHTML = '';
   $('askSourcesBox').style.display = 'none';
+  $('askSteps').style.display = 'none';
   try {
     const data = await api('POST', '/api/ask', {
       repo: repoPath(), question,
@@ -765,7 +773,10 @@ async function askRepo() {
       api_key: $('apiKey').value.trim() || null,
       k: parseInt($('askK').value, 10),
       mode: $('askMode').value,
+      agent: $('askAgent').value === 'agent',
     });
+    $('askSteps').innerHTML = data.steps.map(s => `<li>${esc(s)}</li>`).join('');
+    $('askSteps').style.display = data.steps.length ? '' : 'none';
     askSources = data.sources;
     $('askAnswer').innerHTML = linkCitations(renderMarkdown(data.answer));
     let note = `Answered by ${data.model} from ${data.sources.length} sources, citing ${data.cited.length}.`;
@@ -787,7 +798,8 @@ function renderSources(cited) {
   $('askSourcesTitle').textContent = `Retrieved sources (${askSources.length}, ${used.size} cited)`;
   $('askSources').innerHTML = askSources.map((src, i) => {
     const n = i + 1;
-    const ranks = `vector ${src.vector_rank ? '#' + src.vector_rank : '—'} · keyword ${src.keyword_rank ? '#' + src.keyword_rank : '—'}`;
+    const ranks = `vector ${src.vector_rank ? '#' + src.vector_rank : '—'} · keyword ${src.keyword_rank ? '#' + src.keyword_rank : '—'}`
+      + (src.rerank_score !== null && src.rerank_score !== undefined ? ` · rerank ${src.rerank_score.toFixed(2)}` : '');
     const body = src.type === 'code' ? numberedCode(src.text, src.start_line)
       : `<div class="markdown-body">${renderMarkdown(src.text)}</div>`;
     return `<div class="source${used.has(n) ? ' cited' : ''}"><div class="source-head">`

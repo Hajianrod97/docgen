@@ -20,11 +20,12 @@ from collections import Counter
 from pathlib import Path
 from threading import Timer
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from docgen.agent import ask_agent
 from docgen.ask import CONTEXT_CHARS, DEFAULT_K, ask, make_ask_completer
 from docgen.embeddings import EmbeddingError
 from docgen.hub import (
@@ -43,9 +44,15 @@ from docgen.repo_index import index_status, update_index
 from docgen.repos import RepoError, RepoSource, resolve_repo
 from docgen.search import MODES
 from docgen.search import search as search_repo
+from docgen.store import DatabaseError
 from docgen.walker import walk_repo
 
 app = FastAPI(title="docgen")
+
+
+@app.exception_handler(DatabaseError)
+def database_unavailable(request: Request, exc: DatabaseError) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 STATIC_DIR = Path(__file__).parent / "web_static"
 
 
@@ -292,6 +299,7 @@ class AskRequest(BaseModel):
     api_key: str | None = None  # anthropic only; used for this request only, never stored
     k: int = DEFAULT_K
     mode: str = "hybrid"
+    agent: bool = False  # Agentic mode: the LangGraph agent in docgen/agent.py
 
 
 @app.post("/api/ask")
@@ -315,8 +323,14 @@ def ask_endpoint(req: AskRequest):
         raise HTTPException(400, str(e)) from e
     try:
         update_index(path)
-        answer = ask(path, req.question, complete, model, meter, k=max(1, min(req.k, 20)),
-                     mode=req.mode, budget=CONTEXT_CHARS[req.provider])
+        k = max(1, min(req.k, 20))
+        steps: list[str] = []
+        if req.agent:
+            answer, steps = ask_agent(path, req.question, complete, model, meter, k=k,
+                                      budget=CONTEXT_CHARS[req.provider])
+        else:
+            answer = ask(path, req.question, complete, model, meter, k=k,
+                         mode=req.mode, budget=CONTEXT_CHARS[req.provider])
     except (ProviderError, EmbeddingError) as e:
         raise HTTPException(502, str(e)) from e
     return {
@@ -326,6 +340,7 @@ def ask_endpoint(req: AskRequest):
         "unknown_citations": answer.unknown_citations,
         "model": answer.model,
         "cost_usd": answer.cost_usd,
+        "steps": steps,
     }
 
 

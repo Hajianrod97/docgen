@@ -10,12 +10,12 @@ from pathlib import Path
 import pytest
 from test_hub import MULTILANG, FakeModel, models_for
 
-from docgen import search as searchmod
+from docgen.chunking import tokenize
 from docgen.evaluate import evaluate, load_eval, parse_chunk_label
 from docgen.evaluate import main as eval_main
 from docgen.hub import build_hub
 from docgen.repo_index import update_index
-from docgen.search import RepoRetriever, keyword_index, keyword_scores, rrf, search, tokenize
+from docgen.search import RepoRetriever, rrf, search
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -46,26 +46,6 @@ def test_stemming_matches_word_forms():
     assert tokenize("cloned")[0] == tokenize("clones")[0] == tokenize("cloning")[0]
     assert tokenize("is") == []  # stopword
     assert tokenize("bus") == ["bus"]  # too short to strip
-
-
-def test_bm25_prefers_rare_words_and_short_documents():
-    docs = [["the", "store", "task"], ["the", "api", "client"], ["the"] * 20 + ["store"]]
-    index = keyword_index(docs)
-    scores = keyword_scores(index, ["store"])
-    assert scores[0] > scores[2] > 0 and scores[1] == 0  # same term, shorter doc wins
-    # A word in every document still scores above zero ("+1" IDF), but less than a rare one.
-    assert 0 < keyword_scores(index, ["the"])[1] < keyword_scores(index, ["api"])[1]
-
-
-def test_bm25_counts_a_repeated_query_word_once():
-    index = keyword_index([["store"], ["api"]])
-    assert list(keyword_scores(index, ["store", "store"])) == list(keyword_scores(index, ["store"]))
-
-
-def test_bm25_scores_a_query_with_no_words_as_zero():
-    index = keyword_index([["store"], ["api"]])
-    assert list(keyword_scores(index, [])) == [0, 0]
-    assert list(keyword_scores(index, ["zebra"])) == [0, 0]
 
 
 def test_rrf_rewards_agreement_between_rankings():
@@ -113,7 +93,7 @@ def test_type_filter_and_excluded_paths(repo):
     assert all(h.path != "backend/store.py" for h in hits)
 
 
-def test_keyword_index_is_rebuilt_after_the_index_changes(repo):
+def test_keyword_search_sees_index_changes(repo):
     assert not search(repo, "zebrafish", mode="keyword")
     (repo / "backend" / "zoo.py").write_text("def zebrafish():\n    return 1\n")
     update_index(repo)
@@ -250,14 +230,13 @@ def test_repo_retriever_returns_documents_with_citations(repo):
     assert first.id == search(repo, "TaskStore add task", k=3)[0].id
 
 
-def test_corpus_cache_is_per_repo(repo, tmp_path):
+def test_each_repo_has_its_own_index(repo, tmp_path):
     other = tmp_path / "other"
     other.mkdir()
     (other / "solo.py").write_text("def penguin():\n    return 1\n")
     update_index(other)
     assert search(other, "penguin", mode="keyword")[0].path == "solo.py"
     assert not search(repo, "penguin", mode="keyword")
-    assert str(repo.resolve()) in searchmod._corpora
 
 
 def test_weighted_rrf_and_alpha():

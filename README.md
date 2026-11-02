@@ -13,12 +13,19 @@ Point it at a repo, in any language, and it explains it. It writes a documentati
 
 ## Usage
 
-Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/) (`brew install uv`, or see its install page). Run all commands from this folder.
+Requires Python 3.12+, [uv](https://docs.astral.sh/uv/) (`brew install uv`, or see its install page) and Docker, which runs the database. Run all commands from this folder.
 
 ```bash
+# Postgres with pgvector and ParadeDB's pg_search, in a container (first time only)
+docker run -d --name docgen-db -p 127.0.0.1:5432:5432 \
+  -e POSTGRES_USER=docgen -e POSTGRES_PASSWORD=docgen -e POSTGRES_DB=docgen \
+  -v docgen-pg:/var/lib/postgresql/data paradedb/paradedb:0.26.2-pg17
+
 uv sync                    # creates .venv with the exact versions in uv.lock
 uv run python -m docgen.web
 ```
+
+After a restart, `docker start docgen-db` brings the database back; its data lives in the `docgen-pg` volume. Set `DOCGEN_DATABASE_URL` to use another Postgres server (it needs the `vector` and `pg_search` extensions).
 
 `uv run` keeps `.venv` in step with `uv.lock` before running anything. To use plain `python` instead, activate the environment first (`source .venv/bin/activate`, or `.venv/bin/activate.fish` in fish). Add a dependency with `uv add <package>` (or `uv add --dev <package>` for tests only), which updates `pyproject.toml` and `uv.lock` together.
 
@@ -71,7 +78,7 @@ A public `https://github.com/owner/repo` URL is shallow-cloned into `~/.cache/do
 
 ## The search index
 
-Questions are answered from a search index, kept for now as two files in `.docgen/index` (each entry's text and metadata in `entries.json`, its vector in `vectors.npy`); it is moving to Postgres. It holds two types of entry:
+Questions are answered from a search index in Postgres: one table per repo, one row per entry, holding its text, metadata and embedding (`docgen/store.py`). It holds two types of entry:
 
 - **Code chunks** from every file the walker reads, split along the code's own structure. Every chunk records its file and line range, which answers cite.
   - **Python** is split with `ast` into top-level functions and classes (with their decorators and leading comments). Long classes are split into methods, and the code between definitions is kept as "module" chunks.
@@ -87,7 +94,7 @@ python -m docgen.repo_index path/to/repo                       # update
 python -m docgen.repo_index path/to/repo --query "how are GitHub repos cloned"
 ```
 
-Only files and summaries whose text changed since the last run are embedded again (`.docgen/repo_index.json` keeps each one's hash). Changing the chunking rules or the embedding model rebuilds the whole index. Run it again after building the hub so the new summaries are included. `--query` prints the closest entries, which is a quick way to see what vector search finds and what it misses.
+Only files and summaries whose text changed since the last run are embedded again (the repo's manifest, a row in the `docgen_repos` table, keeps each one's hash; it is saved in the same transaction as the rows it lists, so the two can't disagree after a crash). Changing the chunking rules or the embedding model rebuilds the whole index. Run it again after building the hub so the new summaries are included. `--query` prints the closest entries, which is a quick way to see what vector search finds and what it misses.
 
 The embedding model is all-MiniLM-L6-v2, run locally by [fastembed](https://github.com/qdrant/fastembed) (ONNX Runtime, no PyTorch) and downloaded on first use (about 90 MB). It is the model ChromaDB ran when docgen used Chroma, and gives the same vectors. It reads only the first 256 word pieces of a chunk. `DOCGEN_EMBEDDINGS=ollama` uses nomic-embed-text through a local Ollama server instead (`ollama pull nomic-embed-text`; `ollama:<model>` picks another), which reads whole chunks. `DOCGEN_EMBEDDINGS=hash` swaps in an offline embedder that matches shared words rather than meaning; the tests use it. Changing the choice rebuilds the index on its next update, since vectors from different models can't be compared.
 
@@ -95,7 +102,7 @@ The embedding model is all-MiniLM-L6-v2, run locally by [fastembed](https://gith
 
 `docgen/search.py` runs two searches and merges them. Vector search matches meaning ("downloaded" finds `git clone`) but is weak on exact names; BM25 keyword search finds `estimate` at once but knows no synonyms. The two rankings are merged with reciprocal rank fusion, which only looks at ranks, so the two kinds of score never need to be made comparable. `HYBRID_ALPHA` weights the two lists (0.5, the default, is plain RRF; 1.0 is vector only); see below for why it stays at 0.5. The web server exposes it at `GET /api/search?repo=...&q=...&mode=hybrid|vector|keyword`.
 
-The vector half is cosine similarity between the question's vector and the stored ones, and BM25 scoring comes from [bm25s](https://github.com/xhluca/bm25s), fed by docgen's own tokenizer, which splits identifiers so `make_hub_models` also matches "hub models". Fusion is docgen's own `rrf()`. `RepoRetriever` wraps the whole search as a LangChain retriever (`RepoRetriever(repo_path=...).invoke(question)` returns `Document`s with the citation in their metadata), for LangChain code such as a LangGraph agent. An earlier version used its own BM25 class; LangChain's `BM25Retriever` and `EnsembleRetriever` were considered, but they live in `langchain-community`, which LangChain sunset in May 2026, and `langchain-classic`. Swapping the BM25 class for bm25s left gitsummarize's scores unchanged in every mode.
+Both halves are SQL against the repo's table. The vector half is [pgvector](https://github.com/pgvector/pgvector): an HNSW index ordered by cosine distance, with iterative scans so filters (summaries only, excluded paths) still return a full list. BM25 comes from [ParadeDB's pg_search](https://github.com/paradedb/paradedb), which runs the Tantivy search engine inside Postgres. It indexes a `keywords` column holding docgen's own tokens, split only at spaces, since its standard tokenizers don't split identifiers and docgen's does, so `make_hub_models` also matches "hub models". Each repo has its own table so BM25's word statistics are that repo's alone. Fusion is docgen's own `rrf()`. `RepoRetriever` wraps the whole search as a LangChain retriever (`RepoRetriever(repo_path=...).invoke(question)` returns `Document`s with the citation in their metadata), for LangChain code such as a LangGraph agent. An earlier version used its own BM25 class; LangChain's `BM25Retriever` and `EnsembleRetriever` were considered, but they live in `langchain-community`, which LangChain sunset in May 2026, and `langchain-classic`. Swapping the BM25 class for bm25s left gitsummarize's scores unchanged in every mode, and so did moving both halves into Postgres (hybrid MRR went from 0.74 to 0.78). ChromaDB, and briefly Pinecone, were the vector store before Postgres; one database for vectors, keywords and the manifest replaced three moving parts.
 
 Each chunk's header also spells out the words inside its name and file name (`function make_hub_models (make hub models)`), for searches whose tokenizer doesn't split identifiers. With docgen's own tokenizer it changed nothing beyond noise (within one or two questions either way).
 
@@ -164,6 +171,39 @@ python -m docgen.ask path/to/repo "How are GitHub repos cloned?" --sources
 
 Each question is answered on its own, with no memory of earlier ones. If an answer cites a source number that doesn't exist, or cites nothing, the UI says so.
 
+### Agentic mode
+
+**Mode: Agentic** runs the same pipeline as a [LangGraph](https://github.com/langchain-ai/langgraph) graph that checks its own work (`docgen/agent.py`):
+
+```mermaid
+flowchart LR
+    S([question]) --> R[retrieve<br/>hybrid search + rerank]
+    R -->|best score ≥ -2| G[generate]
+    R -->|weak, ≤ 2 rewrites| W[rewrite<br/>guess identifiers from file paths]
+    W --> R
+    W -->|no new terms| G
+    R -->|nothing found| X[give up]
+    G -->|cites nothing or a missing source, once| G
+    G --> E([answer + steps])
+```
+
+- **retrieve** reorders hybrid search's top 20 with a local cross-encoder reranker (`docgen/rerank.py`, ms-marco-MiniLM-L-12-v2 through fastembed). Its top score is the relevance check, so no model call is spent grading sources.
+- **rewrite** shows the model the repo's file paths and what earlier searches found, and searches again for the question plus the names it guesses. This is the query rewriting that lifted gitsummarize's file hit rate from 88% to 96% in the eval below.
+- **generate** uses Quick mode's prompt; an answer citing nothing, or a source that doesn't exist, is retried once with a note saying what was wrong.
+
+The UI lists the steps taken under the answer. With `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` set, every node's inputs and outputs also go to LangSmith. Quick stays the default: Agentic makes at least one model call more when retrieval is weak, which with a local 7B model is 30 to 90 seconds a question. From the command line: `python -m docgen.agent path/to/repo "question" --provider ollama`.
+
+**Choosing the reranker.** Four fastembed rerankers on the docgen eval set (top 5, hybrid then rerank; `python -m docgen.evaluate evals/docgen.json --rerank`):
+
+| reranker | size | file hit | MRR | chunk hit |
+|---|---|---|---|---|
+| none (hybrid only) | | 94-96% | 0.68-0.70 | 58% |
+| bge-reranker-base | 1 GB | 94% | 0.64 | 50% |
+| **ms-marco-MiniLM-L-12-v2** | 120 MB | **100%** | **0.75** | 58% |
+| jina-reranker-v1-turbo-en | 150 MB | 90% | 0.70 | 52% |
+
+The roadmap had picked bge-reranker-base; measuring showed it made ranking worse here, likely because it was trained on prose, not code. On the held-out gitsummarize set MiniLM-L-12 was about even with hybrid search (file 88% both, MRR 0.78 to 0.74, chunk hit 79% to 83%), so Quick mode doesn't rerank. The threshold of -2.0 comes from the docgen set, where every question has an answer: it sends 4 of 52 through a rewrite they didn't need.
+
 ## Using a free local model (Ollama)
 
 You don't need an Anthropic key. [Ollama](https://ollama.com) runs open models on your own machine, free and offline after the model is downloaded.
@@ -199,7 +239,7 @@ uv run ruff check                              # lint
 DOCGEN_EMBEDDINGS=hash uv run pytest -q        # tests (fish: env DOCGEN_EMBEDDINGS=hash uv run pytest -q)
 ```
 
-GitHub Actions runs both on every push to `main` (`.github/workflows/ci.yml`). The tests fake the models (including a small fake Ollama server), use the offline embedder, clone from a local git repo standing in for GitHub, and drive the web UI through FastAPI's TestClient, so everything runs offline and costs nothing.
+The tests need the database container running. They create their own `docgen_test` database on it, fresh each run, and never touch the real index. GitHub Actions runs both on every push to `main` (`.github/workflows/ci.yml`), with the same ParadeDB image as a service container. The tests fake the models (including a small fake Ollama server), use the offline embedder, clone from a local git repo standing in for GitHub, and drive the web UI through FastAPI's TestClient, so everything runs offline and costs nothing.
 
 ## Look and feel
 

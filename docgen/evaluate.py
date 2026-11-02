@@ -26,6 +26,10 @@ Change one thing (chunk size, the embedding model, how results are fused),
 run this again, and compare. Without numbers like these, a retrieval change
 is a guess.
 
+With --rerank, one more mode runs, "rerank": hybrid search's top
+rerank.CANDIDATES hits reordered by the cross-encoder (docgen.rerank), then
+cut to k. It shows what the reranker adds on top of hybrid search.
+
 With --rewrite, two more modes run, which need a model (Claude Haiku by
 default; rewrites are cached, so a rerun is free):
 
@@ -44,10 +48,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from docgen.rerank import CANDIDATES as RERANK_CANDIDATES
+from docgen.rerank import rerank
 from docgen.search import HYBRID_ALPHA, MODES, SearchHit, search
 
 # Rewrite modes, and the search mode each one runs on the rewritten query.
 REWRITE_MODES = {"rw-keyword": "keyword", "rw-hybrid": "hybrid"}
+RERANK_MODE = "rerank"
 
 
 @dataclass
@@ -58,6 +65,7 @@ class QuestionResult:
     found: list[str] = field(default_factory=list)  # citations of the top results
     chunk_rank: int | None = None  # the same for the first right chunk
     has_chunks: bool = False  # whether the question has chunk labels at all
+    top_score: float | None = None  # rerank mode: the best hit's rerank score
 
 
 @dataclass
@@ -132,7 +140,7 @@ def evaluate(repo: str | Path, questions: list[dict], k: int = 5, mode: str = "h
     repo, it's left out of the results: it contains the questions word for
     word, so it would otherwise "answer" all of them. A rewrite mode needs
     `rewrite`, which turns a question into extra search terms."""
-    search_mode = REWRITE_MODES.get(mode, mode)
+    search_mode = "hybrid" if mode == RERANK_MODE else REWRITE_MODES.get(mode, mode)
     if mode in REWRITE_MODES and rewrite is None:
         raise ValueError(f"Mode {mode} needs a rewrite function")
     exclude = frozenset()
@@ -143,12 +151,16 @@ def evaluate(repo: str | Path, questions: list[dict], k: int = 5, mode: str = "h
         query = q["question"]
         if mode in REWRITE_MODES:
             query = f"{query} {rewrite(query)}"
-        hits = search(repo, query, k=k, mode=search_mode, exclude_paths=exclude, alpha=alpha)
+        if mode == RERANK_MODE:
+            found = search(repo, query, k=RERANK_CANDIDATES, mode=search_mode, exclude_paths=exclude, alpha=alpha)
+            hits = rerank(query, found)[:k]
+        else:
+            hits = search(repo, query, k=k, mode=search_mode, exclude_paths=exclude, alpha=alpha)
         rank = next((n for n, h in enumerate(hits, 1) if _matches(h, q["files"])), None)
         labels = [parse_chunk_label(c) for c in q.get("chunks", [])]
         chunk_rank = next((n for n, h in enumerate(hits, 1) if _matches_chunk(h, labels)), None)
         results.append(QuestionResult(q["question"], q["files"], rank, [h.citation for h in hits],
-                                      chunk_rank, bool(labels)))
+                                      chunk_rank, bool(labels), hits[0].rerank_score if hits else None))
     return ModeResult(mode, k, results)
 
 
@@ -166,6 +178,8 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"weight of vector results in hybrid search, 0-1 (default {HYBRID_ALPHA})")
     parser.add_argument("--mode", choices=MODES + ("all",), default="all")
     parser.add_argument("--misses", action="store_true", help="list the questions each mode missed")
+    parser.add_argument("--rerank", action="store_true",
+                        help="also run hybrid search reordered by the reranker (downloads it on first use)")
     parser.add_argument("--rewrite", action="store_true",
                         help="also run the query-rewriting modes (needs ANTHROPIC_API_KEY, or --provider ollama)")
     parser.add_argument("--provider", choices=["anthropic", "ollama"], default="anthropic",
@@ -184,6 +198,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Updated the search index first ({stats.files_indexed} files, {stats.summaries_indexed} summaries).")
 
     modes = MODES if args.mode == "all" else (args.mode,)
+    if args.rerank:
+        modes = modes + (RERANK_MODE,)
     rewrite, cost = None, None
     if args.rewrite:
         rewrite, cost = _make_rewriter(repo, args.provider, args.rewrite_model)

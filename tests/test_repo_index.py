@@ -4,12 +4,14 @@ what gets stored and when, not how good the search is."""
 import shutil
 
 import pytest
+from psycopg import sql
 from test_hub import MULTILANG, FakeModel, models_for
 
 from docgen import repo_index
 from docgen.hub import build_hub
-from docgen.repo_index import index_status, load_index, load_manifest, update_index
+from docgen.repo_index import index_status, update_index
 from docgen.search import search
+from docgen.store import connect, load_manifest, table_name
 
 
 @pytest.fixture(autouse=True)
@@ -25,9 +27,16 @@ def repo(tmp_path):
 
 
 def entries(repo, **where):
-    stored = load_index(repo)
-    return {i: m for i, m in zip(stored.ids, stored.metadatas, strict=True)
-            if all(m.get(k) == v for k, v in where.items())}
+    """id -> metadata of the stored entries matching `where`."""
+    with connect() as conn:
+        found = conn.execute(sql.SQL("SELECT id, metadata FROM {}").format(sql.Identifier(table_name(repo))))
+        return {i: m for i, m in found if all(m.get(k) == v for k, v in where.items())}
+
+
+def stored_text(repo, doc_id):
+    with connect() as conn:
+        return conn.execute(sql.SQL("SELECT text FROM {} WHERE id = %s").format(sql.Identifier(table_name(repo))),
+                            (doc_id,)).fetchone()[0]
 
 
 def test_first_run_indexes_every_file(repo):
@@ -78,9 +87,7 @@ def test_hub_summaries_are_indexed_as_their_own_type(repo):
     assert any(i.startswith("summary:file:backend/store.py#") for i in summaries)
     overview = [m for m in summaries.values() if m["level"] == "overview"]
     assert overview and overview[0]["section"] == "What it does"
-    stored = load_index(repo)
-    text = stored.texts[stored.ids.index("summary:file:backend/store.py#0")]
-    assert text.startswith("Summary of the file backend/store.py")
+    assert stored_text(repo, "summary:file:backend/store.py#0").startswith("Summary of the file backend/store.py")
 
     # Rebuilding the hub with new text re-indexes just those summaries.
     hub_file = repo / ".docgen" / "hub.json"
@@ -108,7 +115,8 @@ def test_changing_the_embedding_model_rebuilds(repo, monkeypatch):
 
 def test_missing_index_with_a_manifest_rebuilds(repo):
     update_index(repo)
-    shutil.rmtree(repo / repo_index.INDEX_DIRNAME)
+    with connect() as conn:
+        conn.execute(sql.SQL("DROP TABLE {}").format(sql.Identifier(table_name(repo))))
     stats = update_index(repo)
     assert stats.rebuilt and stats.files_indexed == 8
 

@@ -59,6 +59,34 @@ def identifier_words(*names: str) -> list[str]:
     return list(dict.fromkeys(words))
 
 
+_STOPWORDS = frozenset("""
+a an and are as at be by can do does for from has have how i if in into is it its
+of on or so that the their then there these this to was what when where which who
+why will with you your
+""".split())
+
+
+def _stem(token: str) -> str:
+    """A deliberately crude stemmer, so "cloned", "clones" and "clone" match."""
+    for suffix in ("ing", "ed", "es", "s"):
+        if len(token) > len(suffix) + 3 and token.endswith(suffix):
+            return token[: -len(suffix)]
+    return token
+
+
+def tokenize(text: str) -> list[str]:
+    """Words for keyword search. Identifiers are split at underscores and
+    camelCase, and also kept whole, so `make_hub_models` matches "hub models"
+    and itself."""
+    tokens = []
+    for word in re.findall(r"[A-Za-z0-9_]+", text):
+        parts = [p.lower() for p in _CAMEL_PART.findall(word)]
+        if len(parts) > 1:
+            tokens.append(word.lower())
+        tokens += parts
+    return [_stem(t) for t in tokens if t not in _STOPWORDS]
+
+
 @dataclass
 class CodeChunk:
     path: str
