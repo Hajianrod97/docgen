@@ -1,8 +1,8 @@
 """Embedding function selection, set by the DOCGEN_EMBEDDINGS environment variable.
 
-- unset: Chroma's built-in all-MiniLM-L6-v2 (downloaded on first use, runs
-  locally on the CPU). Small and quick, but trained on English sentences, and
-  it reads only the first 256 word pieces of each chunk.
+- unset: all-MiniLM-L6-v2, run locally on the CPU by fastembed (downloaded on
+  first use, about 90 MB). Small and quick, but trained on English sentences,
+  and it reads only the first 256 word pieces of each chunk.
 - "ollama" or "ollama:<model>": an embedding model served by a local Ollama
   server, nomic-embed-text by default (`ollama pull nomic-embed-text`). It
   reads up to 8,192 tokens, so whole chunks are embedded.
@@ -12,6 +12,9 @@
 
 Changing the choice rebuilds a repo's search index on its next update, since
 vectors from different models can't be compared.
+
+Each choice is a LangChain `Embeddings`: embed_documents for what is stored,
+embed_query for questions.
 """
 
 from __future__ import annotations
@@ -24,8 +27,7 @@ import re
 import urllib.error
 import urllib.request
 
-from chromadb import Documents, EmbeddingFunction, Embeddings
-from langchain_core.embeddings import Embeddings as LCEmbeddings
+from langchain_core.embeddings import Embeddings
 
 _TOKEN_RE = re.compile(r"[A-Za-z][a-z0-9]*|[A-Z]+(?![a-z])|\d+")
 
@@ -40,15 +42,17 @@ def _tokenize(text: str) -> list[str]:
     return tokens
 
 
-class HashingEmbedding(EmbeddingFunction[Documents]):
+class HashingEmbedding(Embeddings):
     """Deterministic bag-of-words embedding via the hashing trick."""
+
+    docgen_id = "docgen-hashing"
 
     def __init__(self, dim: int = 384):
         self.dim = dim
 
-    def __call__(self, input: Documents) -> Embeddings:
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
         vectors = []
-        for doc in input:
+        for doc in texts:
             vec = [0.0] * self.dim
             for tok in _tokenize(doc):
                 digest = hashlib.md5(tok.encode("utf-8")).digest()
@@ -59,16 +63,33 @@ class HashingEmbedding(EmbeddingFunction[Documents]):
             vectors.append([v / norm for v in vec])
         return vectors
 
-    @staticmethod
-    def name() -> str:
-        return "docgen-hashing"
+    def embed_query(self, text: str) -> list[float]:
+        return self.embed_documents([text])[0]
 
-    def get_config(self) -> dict:
-        return {"dim": self.dim}
 
-    @staticmethod
-    def build_from_config(config: dict) -> HashingEmbedding:
-        return HashingEmbedding(dim=config.get("dim", 384))
+DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+
+
+class MiniLMEmbedding(Embeddings):
+    """all-MiniLM-L6-v2 through fastembed (ONNX Runtime, no PyTorch). The
+    model is loaded once per process, on first use."""
+
+    docgen_id = f"fastembed:{DEFAULT_MODEL}"
+    _model = None
+
+    @classmethod
+    def _load(cls):
+        if cls._model is None:
+            from fastembed import TextEmbedding
+
+            cls._model = TextEmbedding(DEFAULT_MODEL)
+        return cls._model
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [v.tolist() for v in self._load().embed(texts)]
+
+    def embed_query(self, text: str) -> list[float]:
+        return self.embed_documents([text])[0]
 
 
 class EmbeddingError(Exception):
@@ -82,7 +103,7 @@ DEFAULT_OLLAMA_EMBED_MODEL = "nomic-embed-text"
 _TASK_PREFIXES = {"nomic-embed-text": ("search_document: ", "search_query: ")}
 
 
-class OllamaEmbedding(EmbeddingFunction[Documents]):
+class OllamaEmbedding(Embeddings):
     """Embeddings from a local Ollama server's /api/embed endpoint."""
 
     def __init__(self, model: str = DEFAULT_OLLAMA_EMBED_MODEL, host: str | None = None,
@@ -102,13 +123,13 @@ class OllamaEmbedding(EmbeddingFunction[Documents]):
         """Names the model in the index manifest, so switching models rebuilds."""
         return f"ollama:{self.model}"
 
-    def __call__(self, input: Documents) -> Embeddings:
-        return self._embed([self._prefixes[0] + text for text in input])
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._embed([self._prefixes[0] + text for text in texts])
 
-    def embed_query(self, input: Documents) -> Embeddings:
-        return self._embed([self._prefixes[1] + text for text in input])
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed([self._prefixes[1] + text])[0]
 
-    def _embed(self, texts: list[str]) -> Embeddings:
+    def _embed(self, texts: list[str]) -> list[list[float]]:
         body = json.dumps({"model": self.model, "input": texts, "truncate": True,
                            "options": {"num_ctx": self.num_ctx}}).encode("utf-8")
         request = urllib.request.Request(f"{self.host}/api/embed", data=body,
@@ -129,46 +150,13 @@ class OllamaEmbedding(EmbeddingFunction[Documents]):
             raise EmbeddingError("Ollama's embedding reply did not have one vector per input")
         return vectors
 
-    @staticmethod
-    def name() -> str:
-        return "docgen-ollama"
 
-    def get_config(self) -> dict:
-        return {"model": self.model, "host": self.host}
-
-    @staticmethod
-    def build_from_config(config: dict) -> OllamaEmbedding:
-        return OllamaEmbedding(model=config.get("model", DEFAULT_OLLAMA_EMBED_MODEL), host=config.get("host"))
-
-
-def get_embedding_function():
-    """Return the configured embedding function (None = Chroma's default model)."""
+def get_embedding_function() -> Embeddings:
+    """Return the configured embedding model."""
     choice = os.environ.get("DOCGEN_EMBEDDINGS", "").strip()
     if choice.lower() == "hash":
         return HashingEmbedding()
     if choice.lower() == "ollama" or choice.lower().startswith("ollama:"):
         model = choice.split(":", 1)[1] if ":" in choice else DEFAULT_OLLAMA_EMBED_MODEL
         return OllamaEmbedding(model=model)
-    return None
-
-
-class LangChainEmbeddings(LCEmbeddings):
-    """The configured embedding function behind LangChain's Embeddings
-    interface, so LangChain vector stores embed questions with the same model
-    (and query prefix) the index was built with."""
-
-    def __init__(self, fn=None):
-        if fn is None:
-            fn = get_embedding_function()
-        if fn is None:
-            from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
-
-            fn = DefaultEmbeddingFunction()
-        self.fn = fn
-
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return [[float(x) for x in v] for v in self.fn(texts)]
-
-    def embed_query(self, text: str) -> list[float]:
-        embed = getattr(self.fn, "embed_query", self.fn)
-        return [float(x) for x in embed([text])[0]]
+    return MiniLMEmbedding()

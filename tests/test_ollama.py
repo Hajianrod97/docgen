@@ -212,9 +212,8 @@ def test_ollama_embeddings_prefix_documents_and_queries_differently(ollama):
     from docgen.embeddings import OllamaEmbedding
 
     fn = OllamaEmbedding(host=ollama.url)
-    # Chroma wraps embedding functions and returns numpy arrays.
-    assert [list(map(float, v)) for v in fn(["def a(): pass", "x = 1"])] == [[30.0, 1.0, 0.5], [22.0, 1.0, 0.5]]
-    fn.embed_query(["how?"])
+    assert fn.embed_documents(["def a(): pass", "x = 1"]) == [[30.0, 1.0, 0.5], [22.0, 1.0, 0.5]]
+    fn.embed_query("how?")
     (path, docs), (_, query) = ollama.requests
     assert path == "/api/embed" and docs["model"] == "nomic-embed-text"
     assert docs["input"] == ["search_document: def a(): pass", "search_document: x = 1"]
@@ -225,7 +224,7 @@ def test_ollama_embeddings_prefix_documents_and_queries_differently(ollama):
 def test_models_without_known_prefixes_get_none(ollama):
     from docgen.embeddings import OllamaEmbedding
 
-    OllamaEmbedding("mxbai-embed-large", host=ollama.url)(["text"])
+    OllamaEmbedding("mxbai-embed-large", host=ollama.url).embed_documents(["text"])
     assert ollama.requests[0][1]["input"] == ["text"]
 
 
@@ -234,13 +233,13 @@ def test_embedding_errors_are_clear(ollama):
 
     ollama.status = 404
     with pytest.raises(EmbeddingError, match="ollama pull nomic-embed-text"):
-        OllamaEmbedding(host=ollama.url)(["x"])
+        OllamaEmbedding(host=ollama.url).embed_documents(["x"])
     with pytest.raises(EmbeddingError, match="Could not reach Ollama"):
-        OllamaEmbedding(host=closed_port_url())(["x"])
+        OllamaEmbedding(host=closed_port_url()).embed_documents(["x"])
     ollama.status = 200
     ollama.raw_body = json.dumps({"embeddings": []}).encode()
     with pytest.raises(EmbeddingError, match="one vector per input"):
-        OllamaEmbedding(host=ollama.url)(["x"])
+        OllamaEmbedding(host=ollama.url).embed_documents(["x"])
 
 
 def test_env_var_picks_the_embedding_model(monkeypatch):
@@ -255,7 +254,7 @@ def test_env_var_picks_the_embedding_model(monkeypatch):
     monkeypatch.setenv("DOCGEN_EMBEDDINGS", "hash")
     assert isinstance(get_embedding_function(), HashingEmbedding)
     monkeypatch.delenv("DOCGEN_EMBEDDINGS")
-    assert embedding_name() == "chroma-default:all-MiniLM-L6-v2"
+    assert embedding_name() == "fastembed:sentence-transformers/all-MiniLM-L6-v2"
 
 
 def test_index_and_search_with_ollama_embeddings(tmp_path, ollama, monkeypatch):

@@ -1,7 +1,8 @@
 """Builds the search index behind "Ask the repo": every file's chunks, plus the hub's summaries.
 
-The index is a ChromaDB collection in <repo>/.docgen/chroma. Each entry has
-a `type` in its metadata:
+Each entry is a piece of text, its metadata and its embedding vector. For now
+they are kept in files in <repo>/.docgen/index (see `LocalStore`), a stand-in
+until the index moves to Postgres. Each entry has a `type` in its metadata:
 
 - "code": a chunk of a file, from docgen.chunking. Its metadata has the path
   and line range, which is what answers cite as `file:line`.
@@ -25,15 +26,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import chromadb
+import numpy as np
 
 from docgen.chunking import CHUNKER_VERSION, chunk_file
 from docgen.embeddings import get_embedding_function
 from docgen.hub import ROOT, load_hub
 from docgen.walker import walk_repo
 
-COLLECTION_NAME = "docgen_repo"
-INDEX_DIRNAME = ".docgen/chroma"
+INDEX_DIRNAME = ".docgen/index"
 MANIFEST_FILENAME = ".docgen/repo_index.json"
 INDEX_VERSION = f"{CHUNKER_VERSION}/1"  # chunking rules / document layout
 _BATCH = 128
@@ -67,16 +67,7 @@ def _sha(text: str) -> str:
 
 
 def embedding_name() -> str:
-    fn = get_embedding_function()
-    if fn is None:
-        return "chroma-default:all-MiniLM-L6-v2"
-    return getattr(fn, "docgen_id", None) or fn.name()
-
-
-def get_client(repo_path: str | Path):
-    path = Path(repo_path).resolve() / INDEX_DIRNAME
-    path.mkdir(parents=True, exist_ok=True)
-    return chromadb.PersistentClient(path=str(path))
+    return get_embedding_function().docgen_id
 
 
 def manifest_path(repo_path: str | Path) -> Path:
@@ -185,19 +176,82 @@ def _all_dirs(paths) -> set[str]:
     return dirs
 
 
-def _collection_exists(client) -> bool:
-    try:
-        client.get_collection(COLLECTION_NAME)
-        return True
-    except Exception:
-        return False
+@dataclass
+class StoredIndex:
+    """Everything in the index, in one order: ids, texts, metadata, and one
+    row of `vectors` per entry, scaled to length 1."""
+
+    ids: list[str]
+    texts: list[str]
+    metadatas: list[dict]
+    vectors: np.ndarray
 
 
-def open_repo_collection(repo_path: str | Path):
-    """Open the search index (raises if it hasn't been built)."""
-    return get_client(repo_path).get_collection(
-        name=COLLECTION_NAME, embedding_function=get_embedding_function()
-    )
+def _index_dir(repo: Path) -> Path:
+    return Path(repo).resolve() / INDEX_DIRNAME
+
+
+def load_index(repo_path: str | Path) -> StoredIndex:
+    """Read the stored index (raises FileNotFoundError if it hasn't been built)."""
+    folder = _index_dir(Path(repo_path))
+    rows = json.loads((folder / "entries.json").read_text(encoding="utf-8"))
+    vectors = np.load(folder / "vectors.npy")
+    if len(vectors):
+        vectors = vectors / np.maximum(np.linalg.norm(vectors, axis=1, keepdims=True), 1e-12)
+    return StoredIndex([r["id"] for r in rows], [r["text"] for r in rows],
+                       [r["metadata"] for r in rows], vectors)
+
+
+class LocalStore:
+    """A stand-in index until it moves to Postgres: each entry's text and
+    metadata in <repo>/.docgen/index/entries.json, and its vector in the same
+    row of vectors.npy. Every change rewrites both files, which is fine for
+    one repo at a time and nothing more."""
+
+    def __init__(self, repo: Path):
+        self.repo = Path(repo).resolve()
+        self.folder = _index_dir(self.repo)
+        self.embeddings = get_embedding_function()
+        self.entries: dict[str, tuple[str, dict, list[float]]] = {}
+
+    def exists(self) -> bool:
+        return (self.folder / "entries.json").exists()
+
+    def prepare(self, reset: bool) -> None:
+        self.entries = {}
+        if reset or not self.exists():
+            self._save()
+            return
+        stored = load_index(self.repo)
+        for i, doc_id in enumerate(stored.ids):
+            self.entries[doc_id] = (stored.texts[i], stored.metadatas[i], stored.vectors[i].tolist())
+
+    def delete(self, ids: list[str]) -> None:
+        for doc_id in ids:
+            self.entries.pop(doc_id, None)
+        self._save()
+
+    def upsert(self, entries: list[Entry]) -> None:
+        vectors = self.embeddings.embed_documents([e.text for e in entries])
+        for e, vector in zip(entries, vectors, strict=True):
+            self.entries[e.id] = (e.text, e.metadata, vector)
+        self._save()
+
+    def count(self) -> int:
+        return len(self.entries)
+
+    def _save(self) -> None:
+        """Vectors first, then entries.json, each swapped in whole, so the
+        entries file never lists more rows than the vectors file holds."""
+        self.folder.mkdir(parents=True, exist_ok=True)
+        rows = [{"id": i, "text": t, "metadata": m} for i, (t, m, _) in self.entries.items()]
+        vectors = np.array([v for *_, v in self.entries.values()], dtype=np.float32)
+        with open(self.folder / "vectors.tmp.npy", "wb") as f:
+            np.save(f, vectors)
+        (self.folder / "vectors.tmp.npy").replace(self.folder / "vectors.npy")
+        tmp = self.folder / "entries.tmp.json"
+        tmp.write_text(json.dumps(rows), encoding="utf-8")
+        tmp.replace(self.folder / "entries.json")
 
 
 ProgressFn = Callable[[int, int], None]  # (entries embedded so far, entries to embed)
@@ -213,25 +267,18 @@ def update_index(repo_path: str | Path, on_progress: ProgressFn | None = None,
     languages = {f.path: f.language for f in walked.files}
     dirs = _all_dirs(texts)
 
-    client = get_client(repo)
+    store = LocalStore(repo)
     manifest = load_manifest(repo)
-    if (
+    reset = (
         rebuild or manifest is None
         or manifest.get("version") != INDEX_VERSION
         or manifest.get("embedding") != embedding_name()
-        or not _collection_exists(client)
-    ):
-        try:
-            client.delete_collection(COLLECTION_NAME)
-        except Exception:
-            pass  # nothing to delete yet
+        or not store.exists()
+    )
+    if reset:
         stats.rebuilt = manifest is not None or rebuild
         manifest = _empty_manifest()
-    collection = client.get_or_create_collection(
-        name=COLLECTION_NAME,
-        embedding_function=get_embedding_function(),
-        metadata={"hnsw:space": "cosine"},
-    )
+    store.prepare(reset)
 
     # Work out what changed.
     stale_ids: list[str] = []
@@ -271,7 +318,7 @@ def update_index(repo_path: str | Path, on_progress: ProgressFn | None = None,
     # Apply: deletions first, then additions, saving the manifest as we go so
     # an interrupted run only redoes what wasn't recorded.
     for i in range(0, len(stale_ids), _BATCH):
-        collection.delete(ids=stale_ids[i:i + _BATCH])
+        store.delete(stale_ids[i:i + _BATCH])
     stats.entries_removed = len(stale_ids)
     _save_manifest(repo, manifest)
 
@@ -283,11 +330,7 @@ def update_index(repo_path: str | Path, on_progress: ProgressFn | None = None,
     def flush() -> None:
         nonlocal done
         if pending:
-            collection.upsert(
-                ids=[e.id for e in pending],
-                documents=[e.text for e in pending],
-                metadatas=[e.metadata for e in pending],
-            )
+            store.upsert(list(pending))
             done += len(pending)
         for section, key, digest, ids in pending_records:
             manifest[section][key] = {"hash": digest, "ids": ids}
@@ -305,7 +348,7 @@ def update_index(repo_path: str | Path, on_progress: ProgressFn | None = None,
     flush()
 
     stats.entries_added = total
-    stats.total_entries = collection.count()
+    stats.total_entries = store.count()
     counts = {"code": 0, "summary": 0}
     for record in manifest["files"].values():
         counts["code"] += len(record["ids"])
@@ -379,9 +422,10 @@ def main(argv: list[str] | None = None) -> int:
           f"({stats.by_type.get('code', 0)} code chunks, {stats.by_type.get('summary', 0)} summary parts).")
 
     if args.query:
-        result = open_repo_collection(source.path).query(query_texts=[args.query], n_results=args.k)
-        for doc_id, meta, dist in zip(result["ids"][0], result["metadatas"][0], result["distances"][0], strict=True):
-            print(f"{1 - dist:.3f}  {doc_id}  [{meta['type']}]")
+        from docgen.search import search
+
+        for hit in search(source.path, args.query, k=args.k, mode="vector"):
+            print(f"{hit.id}  [{hit.type}]")
     return 0
 
 

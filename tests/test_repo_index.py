@@ -8,7 +8,8 @@ from test_hub import MULTILANG, FakeModel, models_for
 
 from docgen import repo_index
 from docgen.hub import build_hub
-from docgen.repo_index import index_status, load_manifest, open_repo_collection, update_index
+from docgen.repo_index import index_status, load_index, load_manifest, update_index
+from docgen.search import search
 
 
 @pytest.fixture(autouse=True)
@@ -24,8 +25,9 @@ def repo(tmp_path):
 
 
 def entries(repo, **where):
-    got = open_repo_collection(repo).get(where=where or None)
-    return dict(zip(got["ids"], got["metadatas"], strict=True))
+    stored = load_index(repo)
+    return {i: m for i, m in zip(stored.ids, stored.metadatas, strict=True)
+            if all(m.get(k) == v for k, v in where.items())}
 
 
 def test_first_run_indexes_every_file(repo):
@@ -76,8 +78,9 @@ def test_hub_summaries_are_indexed_as_their_own_type(repo):
     assert any(i.startswith("summary:file:backend/store.py#") for i in summaries)
     overview = [m for m in summaries.values() if m["level"] == "overview"]
     assert overview and overview[0]["section"] == "What it does"
-    got = open_repo_collection(repo).get(ids=["summary:file:backend/store.py#0"])
-    assert got["documents"][0].startswith("Summary of the file backend/store.py")
+    stored = load_index(repo)
+    text = stored.texts[stored.ids.index("summary:file:backend/store.py#0")]
+    assert text.startswith("Summary of the file backend/store.py")
 
     # Rebuilding the hub with new text re-indexes just those summaries.
     hub_file = repo / ".docgen" / "hub.json"
@@ -103,9 +106,9 @@ def test_changing_the_embedding_model_rebuilds(repo, monkeypatch):
     assert load_manifest(repo)["embedding"] == "another-model"
 
 
-def test_missing_collection_with_a_manifest_rebuilds(repo):
+def test_missing_index_with_a_manifest_rebuilds(repo):
     update_index(repo)
-    repo_index.get_client(repo).delete_collection(repo_index.COLLECTION_NAME)
+    shutil.rmtree(repo / repo_index.INDEX_DIRNAME)
     stats = update_index(repo)
     assert stats.rebuilt and stats.files_indexed == 8
 
@@ -134,8 +137,8 @@ def test_progress_is_reported(repo):
 
 def test_query_finds_matching_code(repo):
     update_index(repo)
-    result = open_repo_collection(repo).query(query_texts=["TaskStore add task"], n_results=3)
-    assert any(m["path"] == "backend/store.py" for m in result["metadatas"][0])
+    hits = search(repo, "TaskStore add task", k=3, mode="vector")
+    assert any(h.path == "backend/store.py" for h in hits)
 
 
 def test_web_endpoint_updates_and_reports(repo):

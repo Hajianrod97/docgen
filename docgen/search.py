@@ -2,7 +2,7 @@
 
 The two halves fail differently, which is why both are used:
 
-- Vector search (ChromaDB through LangChain's Chroma vector store,
+- Vector search (cosine similarity to the question's embedding,
   all-MiniLM-L6-v2 by default) matches meaning, so
   "how are repos downloaded" can find code that says `git clone`. It is weak
   on exact names: a question about "the cost estimate" may not find a method
@@ -22,8 +22,8 @@ Plain RRF trusts both lists equally, so a result only one search found loses
 to results both found further down. `alpha` weights the vector list against
 the keyword list: 0.5 is plain RRF, 1.0 is vector only, 0.0 keyword only.
 
-The BM25 index is built in memory from the documents already stored in
-ChromaDB, and rebuilt whenever the index's manifest changes.
+Both halves search an in-memory copy of the stored index, reloaded whenever
+the index changes.
 
 `RepoRetriever` offers the same search as a LangChain retriever, for code
 built on LangChain (such as a LangGraph agent).
@@ -39,13 +39,12 @@ from pathlib import Path
 
 import bm25s
 import numpy as np
-from langchain_chroma import Chroma
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
 
-from docgen.embeddings import LangChainEmbeddings
-from docgen.repo_index import COLLECTION_NAME, get_client, manifest_path, open_repo_collection
+from docgen.embeddings import get_embedding_function
+from docgen.repo_index import INDEX_DIRNAME, load_index
 
 RRF_K = 60  # the usual constant; larger values flatten the difference between ranks
 HYBRID_ALPHA = 0.5  # weight of the vector list in hybrid fusion (0.5 = plain RRF)
@@ -128,31 +127,29 @@ class SearchHit:
 
 
 class _Corpus:
-    """Everything in the index, a BM25 index over it, and the vector store."""
+    """Everything in the index, and a BM25 index over it."""
 
-    def __init__(self, repo: Path, collection):
-        got = collection.get(include=["documents", "metadatas"])
-        self.ids = got["ids"]
-        self.documents = dict(zip(got["ids"], got["documents"], strict=True))
-        self.metadatas = dict(zip(got["ids"], got["metadatas"], strict=True))
-        self.bm25 = keyword_index([tokenize(d) for d in got["documents"]]) if self.ids else None
-        self.vectors = Chroma(client=get_client(repo), collection_name=COLLECTION_NAME,
-                              embedding_function=LangChainEmbeddings(), create_collection_if_not_exists=False)
+    def __init__(self, repo: Path):
+        stored = load_index(repo)
+        self.ids = stored.ids
+        self.vectors = stored.vectors
+        self.documents = dict(zip(stored.ids, stored.texts, strict=True))
+        self.metadatas = dict(zip(stored.ids, stored.metadatas, strict=True))
+        self.bm25 = keyword_index([tokenize(d) for d in stored.texts]) if self.ids else None
 
 
 _corpora: dict[str, tuple[tuple, _Corpus]] = {}
 _corpora_lock = threading.Lock()
 
 
-def _corpus(repo: Path, collection) -> _Corpus:
-    manifest = manifest_path(repo)
-    stat = manifest.stat()
-    stamp = (stat.st_mtime_ns, stat.st_size, collection.count())
+def _corpus(repo: Path) -> _Corpus:
+    stat = (repo / INDEX_DIRNAME / "entries.json").stat()
+    stamp = (stat.st_mtime_ns, stat.st_size)
     with _corpora_lock:
         cached = _corpora.get(str(repo))
         if cached and cached[0] == stamp:
             return cached[1]
-    corpus = _Corpus(repo, collection)
+    corpus = _Corpus(repo)
     with _corpora_lock:
         _corpora[str(repo)] = (stamp, corpus)
     return corpus
@@ -161,6 +158,34 @@ def _corpus(repo: Path, collection) -> _Corpus:
 def _strip_header(document: str) -> str:
     _, sep, rest = document.partition("\n\n")
     return rest if sep else document
+
+
+def _ranked(repo: Path, query: str, mode: str, types: tuple[str, ...] | None,
+            exclude_paths: frozenset[str]):
+    """(vector ranking, keyword ranking, {id: (metadata, text)}) for a question."""
+    corpus = _corpus(repo)
+    if not corpus.ids:
+        return [], [], {}
+
+    def allowed(doc_id: str) -> bool:
+        meta = corpus.metadatas[doc_id]
+        return (not types or meta["type"] in types) and meta["path"] not in exclude_paths
+
+    vector: list[str] = []
+    if mode in ("hybrid", "vector"):
+        question = np.asarray(get_embedding_function().embed_query(query))
+        similarity = corpus.vectors @ (question / max(np.linalg.norm(question), 1e-12))
+        ranked = np.argsort(-similarity, kind="stable")
+        vector = [corpus.ids[i] for i in ranked if allowed(corpus.ids[i])][:CANDIDATES]
+
+    keyword: list[str] = []
+    if mode in ("hybrid", "keyword"):
+        scores = keyword_scores(corpus.bm25, tokenize(query))
+        ranked = sorted(range(len(scores)), key=lambda i: -scores[i])
+        keyword = [corpus.ids[i] for i in ranked if scores[i] > 0 and allowed(corpus.ids[i])][:CANDIDATES]
+
+    entries = {i: (corpus.metadatas[i], corpus.documents[i]) for i in dict.fromkeys(vector + keyword)}
+    return vector, keyword, entries
 
 
 def search(repo_path: str | Path, query: str, k: int = 8, mode: str = "hybrid",
@@ -176,27 +201,9 @@ def search(repo_path: str | Path, query: str, k: int = 8, mode: str = "hybrid",
     if not 0.0 <= alpha <= 1.0:
         raise ValueError(f"alpha must be between 0 and 1, not {alpha}")
     repo = Path(repo_path).resolve()
-    collection = open_repo_collection(repo)
-    corpus = _corpus(repo, collection)
-    if not corpus.ids:
+    vector, keyword, entries = _ranked(repo, query, mode, types, exclude_paths)
+    if not vector and not keyword:
         return []
-    def allowed(doc_id: str) -> bool:
-        meta = corpus.metadatas[doc_id]
-        return (not types or meta["type"] in types) and meta["path"] not in exclude_paths
-
-    vector: list[str] = []
-    if mode in ("hybrid", "vector"):
-        where = {"type": {"$in": list(types)}} if types else None
-        # Ask for extra so excluded entries don't leave the list short.
-        n = min(CANDIDATES + 10 * len(exclude_paths), len(corpus.ids))
-        found = corpus.vectors.similarity_search_with_score(query, k=n, filter=where)
-        vector = [doc.id for doc, _ in found if allowed(doc.id)][:CANDIDATES]
-
-    keyword: list[str] = []
-    if mode in ("hybrid", "keyword"):
-        scores = keyword_scores(corpus.bm25, tokenize(query))
-        ranked = sorted(range(len(scores)), key=lambda i: -scores[i])
-        keyword = [corpus.ids[i] for i in ranked if scores[i] > 0 and allowed(corpus.ids[i])][:CANDIDATES]
 
     # Weights 2·alpha and 2·(1 - alpha), so alpha = 0.5 gives plain RRF's scores.
     fused = rrf([vector, keyword], weights=[2 * alpha, 2 * (1 - alpha)])
@@ -206,16 +213,16 @@ def search(repo_path: str | Path, query: str, k: int = 8, mode: str = "hybrid",
 
     hits = []
     for doc_id in best:
-        meta = corpus.metadatas[doc_id]
+        meta, document = entries[doc_id]
         is_code = meta["type"] == "code"
         hits.append(SearchHit(
             id=doc_id,
             type=meta["type"],
             path=meta["path"],
-            start_line=meta.get("start_line") if is_code else None,
-            end_line=meta.get("end_line") if is_code else None,
+            start_line=meta["start_line"] if is_code else None,
+            end_line=meta["end_line"] if is_code else None,
             label=meta.get("symbol", "") if is_code else (meta.get("section") or meta.get("level", "")),
-            text=_strip_header(corpus.documents[doc_id]),
+            text=_strip_header(document),
             score=round(fused[doc_id], 5),
             vector_rank=vector_rank.get(doc_id),
             keyword_rank=keyword_rank.get(doc_id),
