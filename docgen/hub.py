@@ -312,7 +312,8 @@ def model_cost(model: str, input_tokens: int, output_tokens: int) -> float | Non
     return (input_tokens * price_in + output_tokens * price_out) / 1_000_000
 
 
-def _sha(*parts: str) -> str:
+def sha(*parts: str) -> str:
+    """A content hash: the same parts always give the same key."""
     return hashlib.sha1("\0".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -373,7 +374,7 @@ def _dir_key(info: DirInfo, file_keys: dict[str, str | None], dir_keys: dict[str
     parts = [PROMPT_VERSION, info.path]
     parts += [f"f:{p}:{file_keys.get(p) or 'missing'}" for p in sorted(info.files)]
     parts += [f"d:{d}:{dir_keys.get(d) or 'missing'}" for d in sorted(info.subdirs)]
-    return _sha(*parts)
+    return sha(*parts)
 
 
 def _depth(d: str) -> int:
@@ -402,7 +403,7 @@ def plan_hub(repo_path: str | Path, regenerate: bool = False) -> HubPlan:
                 break
             child, d = d, _dir_of(d)
 
-    file_keys = {p: _sha(PROMPT_VERSION, "file", p, texts[p]) for p in files}
+    file_keys = {p: sha(PROMPT_VERSION, "file", p, texts[p]) for p in files}
     tiny = {p for p in files if files[p].lines < TINY_FILE_LINES}
     # Planning assumes every summary will succeed. A tiny file's key (a hash of
     # its text) still feeds its directory's key, so editing it redoes the directory.
@@ -410,7 +411,7 @@ def plan_hub(repo_path: str | Path, regenerate: bool = False) -> HubPlan:
     for d in sorted(dirs, key=_depth, reverse=True):
         dir_keys[d] = _dir_key(dirs[d], file_keys, dir_keys)
     readme = _readme_path(files)
-    overview_key = _sha(PROMPT_VERSION, "overview", dir_keys[ROOT], texts[readme] if readme else "")
+    overview_key = sha(PROMPT_VERSION, "overview", dir_keys[ROOT], texts[readme] if readme else "")
 
     hub = {"files": {}, "dirs": {}, "overview": None} if regenerate else load_hub(repo_path)
     todo_files = [
@@ -477,7 +478,8 @@ def build_file_prompt(plan: HubPlan, path: str, notes: list[str] | None = None) 
     return SYSTEM_PROMPT, f"{task}\n\n<context>\n{_file_context(plan, path)}\n</context>\n\n{body}"
 
 
-def _clip(text: str, limit: int) -> str:
+def clip(text: str, limit: int) -> str:
+    """The text, cut to `limit` characters with a note saying how much was cut."""
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n[... cut: {len(text) - limit} more characters not shown]"
@@ -494,7 +496,7 @@ def build_dir_prompt(plan: HubPlan, hub: dict, d: str, budget: int) -> tuple[str
         name = posixpath.basename(p)
         if plan.is_tiny(p):
             lines.append(f"{name} - small file, full text below")
-            tiny_blocks.append(f"--- {name} ---\n{_clip(plan.texts[p], TINY_FILE_CHARS)}")
+            tiny_blocks.append(f"--- {name} ---\n{clip(plan.texts[p], TINY_FILE_CHARS)}")
         else:
             purpose = hub["files"].get(p, {}).get("purpose") or "(no summary available)"
             lines.append(f"{name} - {purpose}")
@@ -505,7 +507,7 @@ def build_dir_prompt(plan: HubPlan, hub: dict, d: str, budget: int) -> tuple[str
         path=d or "(repo root)",
         tiny_instructions=DIR_TINY_INSTRUCTIONS if tiny_blocks else "",
     ).rstrip()
-    return SYSTEM_PROMPT, f"{task}\n\n<directory>\n{_clip(content, budget)}\n</directory>"
+    return SYSTEM_PROMPT, f"{task}\n\n<directory>\n{clip(content, budget)}\n</directory>"
 
 
 def build_tree(plan: HubPlan, hub: dict, with_files: bool = True) -> str:
@@ -534,14 +536,14 @@ def build_overview_prompt(plan: HubPlan, hub: dict, budget: int) -> tuple[str, s
     tree = build_tree(plan, hub)
     if len(tree) > budget // 2:
         tree = build_tree(plan, hub, with_files=False)  # large repo: directories only
-    tree = _clip(tree, budget // 2)
+    tree = clip(tree, budget // 2)
     readme_path = _readme_path(plan.files)
-    readme = _clip(plan.texts[readme_path], budget // 6) if readme_path else "(no README)"
+    readme = clip(plan.texts[readme_path], budget // 6) if readme_path else "(no README)"
     top = [ROOT] + sorted(plan.dirs[ROOT].subdirs)
     summaries = "\n\n".join(
         f"#### {d or '(repo root)'}\n{hub['dirs'][d]['summary']}" for d in top if d in hub["dirs"]
     )
-    summaries = _clip(summaries, budget // 3)
+    summaries = clip(summaries, budget // 3)
     user = (
         f"{OVERVIEW_TASK}\n\n<tree>\n{tree}\n</tree>\n\n<readme>\n{readme}\n</readme>"
         f"\n\n<directories>\n{summaries}\n</directories>"
@@ -773,7 +775,7 @@ def build_hub(
     # 3. Overview.
     readme = _readme_path(plan.files)
     root_key = actual_dir_keys[ROOT] or "missing"
-    overview_key = _sha(PROMPT_VERSION, "overview", root_key, plan.texts[readme] if readme else "")
+    overview_key = sha(PROMPT_VERSION, "overview", root_key, plan.texts[readme] if readme else "")
     if (hub["overview"] or {}).get("key") != overview_key and not stop():
         def overview() -> dict:
             reply = models.top_complete(*build_overview_prompt(plan, hub, models.context_chars))

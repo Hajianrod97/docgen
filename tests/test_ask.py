@@ -73,7 +73,7 @@ def test_prompt_stops_adding_sources_at_the_budget_but_keeps_the_first():
     big = "y\n" * 3_000
     _, user, used = build_prompt("q", [hit(1, big), hit(2, big), hit(3)], 5_000)
     assert len(used) == 1
-    assert "more characters]" in user  # the first source was cut to SOURCE_CHARS
+    assert "more characters not shown]" in user  # the first source was cut to SOURCE_CHARS
 
 
 def test_pick_sources_caps_summaries_and_fills_with_code():
@@ -86,19 +86,18 @@ def test_pick_sources_caps_summaries_and_fills_with_code():
 
 
 def test_make_ask_completer_defaults(monkeypatch):
-    import anthropic
+    import langchain_anthropic
 
     created = {}
 
-    class FakeClient:
+    class FakeChat:
         def __init__(self, **kwargs):
             created.update(kwargs)
-            self.messages = self
 
-    monkeypatch.setattr(anthropic, "Anthropic", FakeClient)
+    monkeypatch.setattr(langchain_anthropic, "ChatAnthropic", FakeChat)
     _, model, meter = make_ask_completer("anthropic", api_key="sk-test")
     assert model == ASK_MODEL and isinstance(meter, UsageMeter)
-    assert created == {"api_key": "sk-test"}
+    assert created["api_key"] == "sk-test" and created["model"] == ASK_MODEL
     _, model, meter = make_ask_completer("ollama")
     assert model == "qwen2.5-coder:7b" and meter is None
     with pytest.raises(ValueError):

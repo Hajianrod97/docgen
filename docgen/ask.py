@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from docgen.hub import model_cost
+from docgen.hub import clip, model_cost
 from docgen.llm import (
     DEFAULT_OLLAMA_MODEL,
     Completer,
@@ -64,12 +64,6 @@ class Answer:
     cost_usd: float | None = None
 
 
-def _clip(text: str, limit: int) -> str:
-    if len(text) <= limit:
-        return text
-    return text[:limit] + f"\n[... cut: {len(text) - limit} more characters]"
-
-
 def pick_sources(hits: list[SearchHit], k: int, max_summaries: int = MAX_SUMMARIES) -> list[SearchHit]:
     """The best k hits, with at most `max_summaries` hub summaries. For a broad
     question, summaries outrank code (they are written to answer "what does
@@ -92,7 +86,7 @@ def build_prompt(question: str, hits: list[SearchHit], budget: int) -> tuple[str
     first until the budget is used up, so a long one can't crowd out the rest."""
     blocks, included, used = [], [], 0
     for hit in hits:
-        text = _clip(hit.text, SOURCE_CHARS)
+        text = clip(hit.text, SOURCE_CHARS)
         n = len(included) + 1
         label = f' label="{hit.label.replace(chr(34), chr(39))}"' if hit.label else ""
         block = f'<source n="{n}" citation="{hit.citation}" type="{hit.type}"{label}>\n{text}\n</source>'

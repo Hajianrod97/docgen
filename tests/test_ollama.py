@@ -37,8 +37,6 @@ class FakeOllama:
         self.delay = 0.0
 
     def respond(self, body):
-        if "input" in body:  # /api/embed: a small vector per input, from its length
-            return {"embeddings": [[float(len(t)), 1.0, 0.5] for t in body["input"]]}
         return {"message": {"role": "assistant", "content": "<answer>Locally answered [1].</answer>"}, "done": True}
 
 
@@ -93,7 +91,6 @@ def test_request_matches_ollamas_chat_protocol(ollama):
     path, body = ollama.requests[0]
     assert path == "/api/chat"
     assert body["model"] == "mymodel:7b"
-    assert body["stream"] is False
     assert body["messages"] == [
         {"role": "system", "content": "SYSTEM TEXT"},
         {"role": "user", "content": "USER TEXT"},
@@ -205,73 +202,14 @@ def test_unreachable_ollama_is_a_clear_error(repo, monkeypatch):
     assert r.status_code == 502 and "Could not reach Ollama" in r.json()["detail"]
 
 
-# ------------------------------------------------------------ embeddings
-
-
-def test_ollama_embeddings_prefix_documents_and_queries_differently(ollama):
-    from docgen.embeddings import OllamaEmbedding
-
-    fn = OllamaEmbedding(host=ollama.url)
-    assert fn.embed_documents(["def a(): pass", "x = 1"]) == [[30.0, 1.0, 0.5], [22.0, 1.0, 0.5]]
-    fn.embed_query("how?")
-    (path, docs), (_, query) = ollama.requests
-    assert path == "/api/embed" and docs["model"] == "nomic-embed-text"
-    assert docs["input"] == ["search_document: def a(): pass", "search_document: x = 1"]
-    assert query["input"] == ["search_query: how?"]
-    assert docs["options"]["num_ctx"] == 8192
-
-
-def test_models_without_known_prefixes_get_none(ollama):
-    from docgen.embeddings import OllamaEmbedding
-
-    OllamaEmbedding("mxbai-embed-large", host=ollama.url).embed_documents(["text"])
-    assert ollama.requests[0][1]["input"] == ["text"]
-
-
-def test_embedding_errors_are_clear(ollama):
-    from docgen.embeddings import EmbeddingError, OllamaEmbedding
-
-    ollama.status = 404
-    with pytest.raises(EmbeddingError, match="ollama pull nomic-embed-text"):
-        OllamaEmbedding(host=ollama.url).embed_documents(["x"])
-    with pytest.raises(EmbeddingError, match="Could not reach Ollama"):
-        OllamaEmbedding(host=closed_port_url()).embed_documents(["x"])
-    ollama.status = 200
-    ollama.raw_body = json.dumps({"embeddings": []}).encode()
-    with pytest.raises(EmbeddingError, match="one vector per input"):
-        OllamaEmbedding(host=ollama.url).embed_documents(["x"])
-
-
 def test_env_var_picks_the_embedding_model(monkeypatch):
-    from docgen.embeddings import HashingEmbedding, OllamaEmbedding, get_embedding_function
+    from docgen.embeddings import HashingEmbedding, get_embedding_function
     from docgen.repo_index import embedding_name
 
-    monkeypatch.setenv("DOCGEN_EMBEDDINGS", "ollama")
-    assert isinstance(get_embedding_function(), OllamaEmbedding)
-    assert embedding_name() == "ollama:nomic-embed-text"
-    monkeypatch.setenv("DOCGEN_EMBEDDINGS", "ollama:mxbai-embed-large")
-    assert embedding_name() == "ollama:mxbai-embed-large"
     monkeypatch.setenv("DOCGEN_EMBEDDINGS", "hash")
     assert isinstance(get_embedding_function(), HashingEmbedding)
     monkeypatch.delenv("DOCGEN_EMBEDDINGS")
     assert embedding_name() == "fastembed:sentence-transformers/all-MiniLM-L6-v2"
-
-
-def test_index_and_search_with_ollama_embeddings(tmp_path, ollama, monkeypatch):
-    from docgen.search import search
-
-    monkeypatch.setenv("DOCGEN_EMBEDDINGS", "ollama")
-    monkeypatch.setenv("OLLAMA_HOST", ollama.url)
-    (tmp_path / "a.py").write_text("def alpha():\n    return 1\n")
-    stats = update_index(tmp_path)
-    assert stats.files_indexed == 1
-    assert search(tmp_path, "alpha", k=1, mode="vector")[0].path == "a.py"
-    assert any(b["input"][0].startswith("search_query: ") for _, b in ollama.requests)
-
-
-def test_unreachable_embedding_server_is_a_clear_web_error(tmp_path, monkeypatch):
-    monkeypatch.setenv("DOCGEN_EMBEDDINGS", "ollama")
-    monkeypatch.setenv("OLLAMA_HOST", closed_port_url())
-    (tmp_path / "a.py").write_text("x = 1\n")
-    r = TestClient(web.app).post("/api/search-index", json={"repo": str(tmp_path)})
-    assert r.status_code == 502 and "for embeddings" in r.json()["detail"]
+    monkeypatch.setenv("DOCGEN_EMBEDDINGS", "ollama")  # the option docgen used to have
+    with pytest.raises(ValueError, match="DOCGEN_EMBEDDINGS"):
+        get_embedding_function()

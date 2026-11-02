@@ -36,7 +36,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-CHUNKER_VERSION = "3"  # bump when the rules change, so the index is rebuilt
+CHUNKER_VERSION = "4"  # bump when the rules change, so the index is rebuilt
 
 WINDOW_LINES = 60
 WINDOW_OVERLAP = 10
@@ -46,6 +46,12 @@ _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _CAMEL_PART = re.compile(r"[A-Za-z][a-z0-9]*|[A-Z]+(?![a-z])|\d+")
 
 
+def word_parts(identifier: str) -> list[str]:
+    """The lowercase words in an identifier: `makeHubModels_v2` gives
+    make, hub, models, v, 2."""
+    return [p.lower() for p in _CAMEL_PART.findall(identifier)]
+
+
 def identifier_words(*names: str) -> list[str]:
     """The plain words inside identifiers, when there are any to find:
     `make_hub_models` and `hubExport` give make, hub, models, export.
@@ -53,7 +59,7 @@ def identifier_words(*names: str) -> list[str]:
     words = []
     for name in names:
         for ident in re.findall(r"[A-Za-z0-9_]+", name):
-            parts = [p.lower() for p in _CAMEL_PART.findall(ident)]
+            parts = word_parts(ident)
             if len(parts) > 1:
                 words += parts
     return list(dict.fromkeys(words))
@@ -80,7 +86,7 @@ def tokenize(text: str) -> list[str]:
     and itself."""
     tokens = []
     for word in re.findall(r"[A-Za-z0-9_]+", text):
-        parts = [p.lower() for p in _CAMEL_PART.findall(word)]
+        parts = word_parts(word)
         if len(parts) > 1:
             tokens.append(word.lower())
         tokens += parts
@@ -198,15 +204,14 @@ def _python_chunks(text: str, lines: list[str]) -> list[tuple[int, int, str, str
 
 # -------------------------------------------------------------- tree-sitter
 
-# File suffix -> tree-sitter grammar. TSX needs its own grammar for the JSX.
-TREE_SITTER_GRAMMARS = {
-    ".ts": "typescript", ".mts": "typescript", ".cts": "typescript", ".tsx": "tsx",
-    ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
-    ".go": "go", ".rs": "rust", ".java": "java", ".kt": "kotlin", ".kts": "kotlin",
-    ".scala": "scala", ".rb": "ruby", ".php": "php", ".cs": "csharp", ".swift": "swift",
-    ".c": "c", ".h": "c", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".hpp": "cpp",
-    ".lua": "lua", ".dart": "dart", ".ex": "elixir", ".exs": "elixir",
-}
+# Grammars whose files are split along their definitions (tree-sitter-language-pack
+# picks the grammar from the file's extension; TSX gets its own, for the JSX).
+# Other files, such as YAML, JSON or HTML, have no definitions to split at and
+# are cut into line windows.
+STRUCTURED_GRAMMARS = frozenset({
+    "typescript", "tsx", "javascript", "go", "rust", "java", "kotlin", "scala", "ruby",
+    "php", "csharp", "swift", "c", "cpp", "lua", "dart", "elixir",
+})
 
 # What a node type defines, matched by substring on the node's type name, first
 # match wins. Grammars name things differently (function_declaration in TS,
@@ -409,9 +414,10 @@ def _tree_units(
 
 
 def _tree_sitter_chunks(path: str, text: str, lines: list[str]) -> list[tuple[int, int, str, str]] | None:
-    suffix = os.path.splitext(path)[1].lower()
-    grammar = TREE_SITTER_GRAMMARS.get(suffix)
-    parser = _tree_sitter_parser(grammar) if grammar else None
+    from tree_sitter_language_pack import detect_language_from_path
+
+    grammar = detect_language_from_path(path)
+    parser = _tree_sitter_parser(grammar) if grammar in STRUCTURED_GRAMMARS else None
     if parser is None:
         return None
     # tree-sitter counts lines at "\n" only; skip files where splitlines() would

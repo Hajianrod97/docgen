@@ -388,27 +388,29 @@ def test_import_graph_python_and_typescript(tmp_path):
 # ------------------------------------------------------- anthropic completer
 
 
-class FakeResponse:
-    def __init__(self, text, stop_reason="end_turn"):
-        self.content = [type("Block", (), {"type": "text", "text": text})()]
-        self.stop_reason = stop_reason
-        self.usage = type("Usage", (), {"input_tokens": 100, "output_tokens": 20})()
+def FakeResponse(text, stop_reason="end_turn"):  # noqa: N802 (stands in for a class)
+    from langchain_core.messages import AIMessage
+
+    return AIMessage(content=text, response_metadata={"stop_reason": stop_reason},
+                     usage_metadata={"input_tokens": 100, "output_tokens": 20, "total_tokens": 120})
 
 
 def fake_anthropic(monkeypatch, response):
-    import anthropic
+    """Stand in for LangChain's ChatAnthropic, so no request leaves the machine:
+    records the settings it was made with and returns `response`."""
+    import langchain_anthropic
 
     sent = {}
 
-    class Client:
+    class FakeChat:
         def __init__(self, **kwargs):
-            self.messages = self
-
-        def create(self, **kwargs):
             sent.update(kwargs)
+
+        def invoke(self, messages):
+            sent["messages"] = messages
             return response
 
-    monkeypatch.setattr(anthropic, "Anthropic", Client)
+    monkeypatch.setattr(langchain_anthropic, "ChatAnthropic", FakeChat)
     return sent
 
 

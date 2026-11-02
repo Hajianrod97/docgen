@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pathspec
+from tree_sitter_language_pack import detect_language_from_path
 
 MAX_FILE_BYTES = 200_000
 
@@ -46,29 +47,19 @@ LOCKFILE_NAMES = {
     "Podfile.lock", "flake.lock", "packages.lock.json",
 }
 
-# Extension -> language name. Used for display now, and later to pick import
-# patterns and splitting rules per language.
-LANGUAGE_BY_SUFFIX = {
-    ".py": "python", ".pyi": "python",
-    ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
-    ".ts": "typescript", ".tsx": "typescript", ".mts": "typescript", ".cts": "typescript",
-    ".go": "go", ".rs": "rust", ".java": "java", ".kt": "kotlin", ".kts": "kotlin",
-    ".scala": "scala", ".rb": "ruby", ".php": "php", ".cs": "csharp", ".swift": "swift",
-    ".c": "c", ".h": "c", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".hpp": "cpp",
-    ".m": "objective-c", ".dart": "dart", ".lua": "lua", ".ex": "elixir", ".exs": "elixir",
-    ".erl": "erlang", ".hs": "haskell", ".clj": "clojure", ".r": "r", ".jl": "julia",
-    ".sh": "shell", ".bash": "shell", ".zsh": "shell", ".fish": "shell", ".ps1": "powershell",
-    ".sql": "sql", ".graphql": "graphql", ".proto": "protobuf",
-    ".html": "html", ".htm": "html", ".vue": "vue", ".svelte": "svelte",
-    ".css": "css", ".scss": "css", ".sass": "css", ".less": "css",
-    ".md": "markdown", ".mdx": "markdown", ".rst": "rst", ".txt": "text",
-    ".json": "json", ".jsonc": "json", ".yaml": "yaml", ".yml": "yaml", ".toml": "toml",
-    ".ini": "ini", ".cfg": "ini", ".xml": "xml", ".tf": "terraform",
-}
-
+# File names tree-sitter can't place by extension.
 LANGUAGE_BY_NAME = {
     "Dockerfile": "dockerfile", "Containerfile": "dockerfile", "Makefile": "make",
     "Jenkinsfile": "groovy", "Gemfile": "ruby", "Rakefile": "ruby", "Procfile": "text",
+}
+
+# Extensions tree-sitter doesn't know or names oddly (it calls .txt "vimdoc").
+LANGUAGE_BY_SUFFIX = {".txt": "text", ".jsonc": "json", ".mdx": "markdown", ".sass": "css"}
+
+# tree-sitter's grammar names, shown under the more familiar name.
+LANGUAGE_ALIASES = {
+    "tsx": "typescript", "bash": "shell", "zsh": "shell", "fish": "shell",
+    "objc": "objective-c", "proto": "protobuf", "scss": "css", "less": "css",
 }
 
 
@@ -90,12 +81,17 @@ class WalkResult:
 
 
 def detect_language(name: str) -> str:
-    """Best-effort language name for a file; "text" when unknown."""
+    """Best-effort language name for a file; "text" when unknown. Extensions
+    are looked up by tree-sitter-language-pack, which knows a few hundred."""
     if name in LANGUAGE_BY_NAME:
         return LANGUAGE_BY_NAME[name]
     if name.startswith("Dockerfile."):
         return "dockerfile"
-    return LANGUAGE_BY_SUFFIX.get(Path(name).suffix.lower(), "text")
+    suffix = Path(name).suffix.lower()
+    if suffix in LANGUAGE_BY_SUFFIX:
+        return LANGUAGE_BY_SUFFIX[suffix]
+    found = detect_language_from_path(name)
+    return LANGUAGE_ALIASES.get(found, found) if found else "text"
 
 
 def _is_generated_name(name: str) -> str | None:

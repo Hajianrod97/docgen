@@ -19,7 +19,6 @@ rebuilds everything, since vectors from different models can't be mixed.
 
 from __future__ import annotations
 
-import hashlib
 import posixpath
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -27,7 +26,7 @@ from pathlib import Path
 
 from docgen.chunking import CHUNKER_VERSION, chunk_file
 from docgen.embeddings import get_embedding_function
-from docgen.hub import ROOT, load_hub
+from docgen.hub import ROOT, load_hub, sha
 from docgen.store import PostgresStore, load_manifest
 from docgen.walker import walk_repo
 
@@ -56,10 +55,6 @@ class IndexStats:
     entries_removed: int = 0
     total_entries: int = 0
     by_type: dict = field(default_factory=dict)
-
-
-def _sha(text: str) -> str:
-    return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
 def embedding_name() -> str:
@@ -188,7 +183,7 @@ def update_index(repo_path: str | Path, on_progress: ProgressFn | None = None,
                 del manifest["files"][path]
                 stats.files_removed += 1
         for path, text in texts.items():
-            digest = _sha(text)
+            digest = sha(text)
             record = manifest["files"].get(path)
             if record and record["hash"] == digest:
                 stats.files_unchanged += 1
@@ -205,7 +200,7 @@ def update_index(repo_path: str | Path, on_progress: ProgressFn | None = None,
                 del manifest["summaries"][source_id]
                 stats.summaries_removed += 1
         for source_id, (level, path, text) in sources.items():
-            digest = _sha(text)
+            digest = sha(text)
             record = manifest["summaries"].get(source_id)
             if record and record["hash"] == digest:
                 continue
@@ -267,13 +262,13 @@ def index_status(repo_path: str | Path) -> dict:
         return {"indexed": False, "files_changed": None, "summaries_changed": None, "entries": 0}
     walked = walk_repo(repo)
     texts = {f.path: f.abs_path.read_text(encoding="utf-8") for f in walked.files}
-    changed = sum(1 for p, t in texts.items() if manifest["files"].get(p, {}).get("hash") != _sha(t))
+    changed = sum(1 for p, t in texts.items() if manifest["files"].get(p, {}).get("hash") != sha(t))
     changed += sum(1 for p in manifest["files"] if p not in texts)
     dirs = _all_dirs(texts)
     sources = summary_sources(load_hub(repo), set(texts), dirs)
     summaries_changed = sum(
         1 for sid, (_, _, text) in sources.items()
-        if manifest["summaries"].get(sid, {}).get("hash") != _sha(text)
+        if manifest["summaries"].get(sid, {}).get("hash") != sha(text)
     ) + sum(1 for sid in manifest["summaries"] if sid not in sources)
     outdated_setup = manifest.get("version") != INDEX_VERSION or manifest.get("embedding") != embedding_name()
     entries = sum(len(r["ids"]) for r in manifest["files"].values()) + sum(

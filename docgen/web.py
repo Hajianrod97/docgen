@@ -27,7 +27,6 @@ from pydantic import BaseModel
 
 from docgen.agent import ask_agent
 from docgen.ask import CONTEXT_CHARS, DEFAULT_K, ask, make_ask_completer
-from docgen.embeddings import EmbeddingError
 from docgen.hub import (
     HubStopped,
     build_hub,
@@ -267,10 +266,7 @@ def search_index(req: SearchIndexRequest):
     """Index every file's chunks and the hub's summaries for Ask. Only what
     changed since the last run is embedded again."""
     path = _resolve_repo(req.repo)
-    try:
-        stats = update_index(path, rebuild=req.rebuild)
-    except EmbeddingError as e:
-        raise HTTPException(502, str(e)) from e
+    stats = update_index(path, rebuild=req.rebuild)
     return dict(dataclasses.asdict(stats), status=index_status(path))
 
 
@@ -331,7 +327,7 @@ def ask_endpoint(req: AskRequest):
         else:
             answer = ask(path, req.question, complete, model, meter, k=k,
                          mode=req.mode, budget=CONTEXT_CHARS[req.provider])
-    except (ProviderError, EmbeddingError) as e:
+    except ProviderError as e:
         raise HTTPException(502, str(e)) from e
     return {
         "answer": answer.text,

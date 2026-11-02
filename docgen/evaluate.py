@@ -30,21 +30,12 @@ With --rerank, one more mode runs, "rerank": hybrid search's top
 rerank.CANDIDATES hits reordered by the cross-encoder (docgen.rerank), then
 cut to k. It shows what the reranker adds on top of hybrid search.
 
-With --rewrite, two more modes run, which need a model (Claude Haiku by
-default; rewrites are cached, so a rerun is free):
-
-- rw-keyword: a model turns the question into likely identifiers first, then
-  keyword search looks for the question plus those terms. Exact search with
-  a model in front of it, the way a coding agent searches.
-- rw-hybrid: the same rewritten query through hybrid search.
-
-Run: python -m docgen.evaluate evals/docgen.json [--k 5] [--mode hybrid] [--rewrite]
+Run: python -m docgen.evaluate evals/docgen.json [--k 5] [--mode hybrid] [--rerank]
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -52,8 +43,6 @@ from docgen.rerank import CANDIDATES as RERANK_CANDIDATES
 from docgen.rerank import rerank
 from docgen.search import HYBRID_ALPHA, MODES, SearchHit, search
 
-# Rewrite modes, and the search mode each one runs on the rewritten query.
-REWRITE_MODES = {"rw-keyword": "keyword", "rw-hybrid": "hybrid"}
 RERANK_MODE = "rerank"
 
 
@@ -134,23 +123,17 @@ def _relative_to(path: Path, repo: Path) -> str | None:
 
 def evaluate(repo: str | Path, questions: list[dict], k: int = 5, mode: str = "hybrid",
              eval_file: str | Path | None = None,
-             rewrite: Callable[[str], str] | None = None,
              alpha: float = HYBRID_ALPHA) -> ModeResult:
     """Run every question through search. If the eval file sits inside the
     repo, it's left out of the results: it contains the questions word for
-    word, so it would otherwise "answer" all of them. A rewrite mode needs
-    `rewrite`, which turns a question into extra search terms."""
-    search_mode = "hybrid" if mode == RERANK_MODE else REWRITE_MODES.get(mode, mode)
-    if mode in REWRITE_MODES and rewrite is None:
-        raise ValueError(f"Mode {mode} needs a rewrite function")
+    word, so it would otherwise "answer" all of them."""
+    search_mode = "hybrid" if mode == RERANK_MODE else mode
     exclude = frozenset()
     if eval_file and (rel := _relative_to(Path(eval_file), Path(repo))):
         exclude = frozenset({rel})
     results = []
     for q in questions:
         query = q["question"]
-        if mode in REWRITE_MODES:
-            query = f"{query} {rewrite(query)}"
         if mode == RERANK_MODE:
             found = search(repo, query, k=RERANK_CANDIDATES, mode=search_mode, exclude_paths=exclude, alpha=alpha)
             hits = rerank(query, found)[:k]
@@ -167,7 +150,6 @@ def evaluate(repo: str | Path, questions: list[dict], k: int = 5, mode: str = "h
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
-    from docgen.llm import ProviderError
     from docgen.repo_index import update_index
     from docgen.repos import RepoError, resolve_repo
 
@@ -180,11 +162,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--misses", action="store_true", help="list the questions each mode missed")
     parser.add_argument("--rerank", action="store_true",
                         help="also run hybrid search reordered by the reranker (downloads it on first use)")
-    parser.add_argument("--rewrite", action="store_true",
-                        help="also run the query-rewriting modes (needs ANTHROPIC_API_KEY, or --provider ollama)")
-    parser.add_argument("--provider", choices=["anthropic", "ollama"], default="anthropic",
-                        help="who rewrites queries (default anthropic)")
-    parser.add_argument("--rewrite-model", help="model that rewrites queries")
     args = parser.parse_args(argv)
 
     repo_text, questions = load_eval(args.eval_file)
@@ -200,16 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     modes = MODES if args.mode == "all" else (args.mode,)
     if args.rerank:
         modes = modes + (RERANK_MODE,)
-    rewrite, cost = None, None
-    if args.rewrite:
-        rewrite, cost = _make_rewriter(repo, args.provider, args.rewrite_model)
-        modes = modes + tuple(REWRITE_MODES)
-    try:
-        results = [evaluate(repo, questions, args.k, m, eval_file=args.eval_file, rewrite=rewrite, alpha=args.alpha)
-                   for m in modes]
-    except ProviderError as e:
-        print(f"Stopped: {e}")
-        return 1
+    results = [evaluate(repo, questions, args.k, m, eval_file=args.eval_file, alpha=args.alpha) for m in modes]
     print(f"{len(questions)} questions, top {args.k} results\n")
     with_chunks = results[0].chunk_hit_rate is not None
     print(f"{'mode':<11} {'hit rate':>9} {'MRR':>6}" + (f" {'chunk hit':>10} {'chunk MRR':>10}" if with_chunks else ""))
@@ -220,9 +188,6 @@ def main(argv: list[str] | None = None) -> int:
         print(row)
     if with_chunks and len(results[0].labelled) < len(questions):
         print(f"(chunk numbers cover the {len(results[0].labelled)} questions with chunk labels)")
-    if cost:
-        spent = cost()
-        print(f"\nRewriting cost {'nothing (all cached or free)' if not spent else f'${spent:.4f}'}.")
 
     if args.misses or len(results) == 1:
         for r in results:
@@ -239,46 +204,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nRight file but not the right chunk, {r.mode}:")
             for q in wrong_chunk:
                 print(f"  - {q.question}\n    got {', '.join(q.found[:3])}")
-    if args.misses and rewrite:
-        print("\nRewrites (cached in .docgen/rewrites.json):")
-        for q in questions:
-            print(f"  - {q['question']}\n    -> {rewrite(q['question'])}")
     return 0
-
-
-def _make_rewriter(repo: Path, provider: str, model: str | None):
-    """(question -> terms, () -> dollars spent so far). A reply without the
-    expected tags falls back to no extra terms, so one bad reply can't stop
-    the eval."""
-    from docgen.hub import model_cost
-    from docgen.llm import (
-        DEFAULT_OLLAMA_MODEL,
-        GenerationError,
-        UsageMeter,
-        make_anthropic_completer,
-        make_ollama_completer,
-    )
-    from docgen.rewrite import REWRITE_MODEL, rewrite_query
-
-    meter = None
-    if provider == "anthropic":
-        model = model or REWRITE_MODEL
-        meter = UsageMeter()
-        complete = make_anthropic_completer(model, effort="low", meter=meter)
-    else:
-        model = model or DEFAULT_OLLAMA_MODEL
-        complete = make_ollama_completer(model, max_tokens=256)
-
-    def rewrite(question: str) -> str:
-        try:
-            return rewrite_query(repo, question, complete, model)
-        except GenerationError:
-            return ""
-
-    def cost() -> float | None:
-        return model_cost(model, meter.input_tokens, meter.output_tokens) if meter else 0.0
-
-    return rewrite, cost
 
 
 if __name__ == "__main__":

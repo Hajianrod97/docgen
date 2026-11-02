@@ -96,7 +96,7 @@ python -m docgen.repo_index path/to/repo --query "how are GitHub repos cloned"
 
 Only files and summaries whose text changed since the last run are embedded again (the repo's manifest, a row in the `docgen_repos` table, keeps each one's hash; it is saved in the same transaction as the rows it lists, so the two can't disagree after a crash). Changing the chunking rules or the embedding model rebuilds the whole index. Run it again after building the hub so the new summaries are included. `--query` prints the closest entries, which is a quick way to see what vector search finds and what it misses.
 
-The embedding model is all-MiniLM-L6-v2, run locally by [fastembed](https://github.com/qdrant/fastembed) (ONNX Runtime, no PyTorch) and downloaded on first use (about 90 MB). It is the model ChromaDB ran when docgen used Chroma, and gives the same vectors. It reads only the first 256 word pieces of a chunk. `DOCGEN_EMBEDDINGS=ollama` uses nomic-embed-text through a local Ollama server instead (`ollama pull nomic-embed-text`; `ollama:<model>` picks another), which reads whole chunks. `DOCGEN_EMBEDDINGS=hash` swaps in an offline embedder that matches shared words rather than meaning; the tests use it. Changing the choice rebuilds the index on its next update, since vectors from different models can't be compared.
+The embedding model is all-MiniLM-L6-v2, run locally by [fastembed](https://github.com/qdrant/fastembed) (ONNX Runtime, no PyTorch) and downloaded on first use (about 90 MB). It is the model ChromaDB ran when docgen used Chroma, and gives the same vectors. It reads only the first 256 word pieces of a chunk. `DOCGEN_EMBEDDINGS=hash` swaps in an offline embedder that matches shared words rather than meaning; the tests use it. Changing the choice rebuilds the index on its next update, since vectors from different models can't be compared.
 
 ### Hybrid search
 
@@ -108,7 +108,7 @@ Each chunk's header also spells out the words inside its name and file name (`fu
 
 ### Measuring it
 
-There are two question sets: `evals/docgen.json`, 52 questions about docgen's own code, and `evals/gitsummarize.json`, 48 questions about [gitsummarize](https://github.com/antarixxx/gitsummarize), a Python backend with a TypeScript frontend. Each question lists the files that answer it and, more precisely, the chunks: a path plus a piece of text the right chunk contains, such as `docgen/hub.py :: def _tiny_description`. Run:
+There are two question sets: `evals/docgen.json`, 51 questions about docgen's own code, and `evals/gitsummarize.json`, 48 questions about [gitsummarize](https://github.com/antarixxx/gitsummarize), a Python backend with a TypeScript frontend. Each question lists the files that answer it and, more precisely, the chunks: a path plus a piece of text the right chunk contains, such as `docgen/hub.py :: def _tiny_description`. Run:
 
 ```bash
 python -m docgen.evaluate evals/docgen.json --misses
@@ -125,7 +125,7 @@ Top 5, MiniLM embeddings, plain RRF:
 | keyword | 77%, MRR 0.53 | 42%, MRR 0.25 | 83%, MRR 0.70 | 81%, MRR 0.63 |
 | hybrid, query rewritten by qwen2.5-coder:7b | 87%, MRR 0.61 | 60%, MRR 0.32 | **96%**, MRR 0.76 | **85%**, MRR 0.65 |
 
-Search usually finds the right file but often not the right part of it, especially in docgen's long modules: that gap is what a reranker should close. Rewriting the question into likely identifiers with a local model helped on gitsummarize and hurt on docgen, so it isn't used by default. With 50 questions, one question is worth 2 points.
+Search usually finds the right file but often not the right part of it, especially in docgen's long modules: that gap is what a reranker should close. Rewriting the question into likely identifiers with a local model helped on gitsummarize and hurt on docgen, so search doesn't do it on its own; Agentic mode (below) does it only when the sources it found look irrelevant. With 50 questions, one question is worth 2 points.
 
 The rest of this section was measured on the first, smaller question sets (20 and 18 questions, files only). Switching TypeScript from 60-line windows to tree-sitter chunks changed gitsummarize like this (top 5):
 
@@ -142,7 +142,7 @@ The rest of this section was measured on the first, smaller question sets (20 an
 | all-MiniLM-L6-v2 | 37/38 | 34/38 |
 | nomic-embed-text | 38/38 | 32/38 |
 
-nomic did better on gitsummarize in every mode but ranked worse in the top 3 on docgen. With this few questions one question is worth 5–6 points, so neither is a clear winner and MiniLM stays the default.
+nomic did better on gitsummarize in every mode but ranked worse in the top 3 on docgen. With this few questions one question is worth 5–6 points, so neither is a clear winner. MiniLM stayed the default, and the nomic option was later removed: it needed Ollama running for every index update and search, for no measured gain.
 
 **Weighting the two halves.** Plain RRF trusts both lists equally, so a result only one half finds gets pushed down: on docgen, `imports.py` was rank 1 in vector search but rank 4 after fusion, and on 8 of 20 questions hybrid ranked the right file lower than vector search alone. `--alpha` weights the vector list more. Tuned on docgen, α ≈ 0.6–0.8 was best (MiniLM at α = 0.8: top-3 hit rate 100%, MRR 0.73). Checked on gitsummarize, which it wasn't tuned on, every α above 0.5 was *worse* for both models (MiniLM top-5 hit rate 94% → 89%, MRR 0.81 → 0.75). One weight doesn't carry over between repos, so the default stays at plain RRF; reranking the fused results is the better fix.
 
@@ -220,6 +220,7 @@ ollama pull qwen2.5-coder:7b
 - **One call at a time:** hub builds with Ollama run sequentially, and prompts are kept smaller to fit the local model's context. docgen asks Ollama for an 8192-token context window, because Ollama's small default would silently cut off long prompts.
 - **First request is slow** while the model loads into memory; later ones are faster.
 - **Quality:** small open models are more likely than Claude to describe things the code doesn't show, or to ignore the required output format (those summaries are recorded as errors and retried on the next build).
+- **How it's wired:** both providers are LangChain chat models (`ChatAnthropic`, `ChatOllama`) behind one `complete(system, user)` function in `docgen/llm.py`, so the rest of docgen doesn't know which is in use, and adding a provider is a few lines.
 
 ## Which files are read
 
@@ -230,7 +231,7 @@ docgen walks the whole repo and reads every text file, in any language, except:
 - Lockfiles (`package-lock.json`, `poetry.lock`, `*.lock`, ...), minified files (`*.min.*`) and source maps.
 - Binaries, files that aren't UTF-8, files over 200 KB, and symlinks (never followed).
 
-**Scan** lists how many files were read per language and, under *skipped*, every file left out by the last two rules with the reason. Files matched by ignore rules are left out without being listed.
+Each file's language comes from its extension, looked up by tree-sitter-language-pack (a few hundred languages), with a short list of overrides in `docgen/walker.py` for names it doesn't know, such as `Dockerfile`. **Scan** lists how many files were read per language and, under *skipped*, every file left out by the last two rules with the reason. Files matched by ignore rules are left out without being listed.
 
 ## Tests
 
@@ -247,7 +248,7 @@ Styled as a plain dark dev-tool (GitHub Dark-style grays and blue), and self-con
 
 ## Known limitations
 
-- The Ollama client has been run against a real server (qwen2.5-coder:7b and nomic-embed-text), which is where the measurements above come from. The Anthropic client has only been tested against a fake that follows the documented protocol, since no API key was available. Build the hub for a small repo and ask a couple of questions first, and read the output, before using it at scale.
+- The Ollama client has been run against a real server (qwen2.5-coder:7b, and nomic-embed-text while docgen offered it), which is where the measurements above come from. The Anthropic client has only been tested against a fake that follows the documented protocol, since no API key was available. Build the hub for a small repo and ask a couple of questions first, and read the output, before using it at scale.
 - With a 7B local model, Ask often leaves out citations, and an answer takes 18–40 seconds.
 - Summaries and answers describe only what the model was shown, and can still be wrong. Answers cite their sources so you can check them; summaries don't.
 - Imports are found with patterns for Python and JavaScript/TypeScript only. Files in other languages get their folder neighbors as context instead.

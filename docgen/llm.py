@@ -2,7 +2,8 @@
 
 Every model call in docgen goes through a plain `complete(system, user) -> str`
 callable, so the hub and Ask can be tested with fakes and don't care which
-provider is behind it. The errors are split by what the caller should do:
+provider is behind it. Behind it is a LangChain chat model (ChatAnthropic or
+ChatOllama), which handles each API, so LangSmith traces model calls too. The errors are split by what the caller should do:
 ProviderSetupError (bad key, unknown model, Ollama not running) means stop,
 since every later call would fail the same way; ProviderError means this one
 call failed; GenerationError means the reply came back but wasn't usable.
@@ -10,12 +11,11 @@ call failed; GenerationError means the reply came back but wasn't usable.
 
 from __future__ import annotations
 
-import json
 import os
 import threading
-import urllib.error
-import urllib.request
 from collections.abc import Callable
+
+from langchain_core.messages import HumanMessage, SystemMessage
 
 Completer = Callable[[str, str], str]
 
@@ -71,32 +71,33 @@ def make_anthropic_completer(
     is added to `meter` when one is given.
     """
     import anthropic
+    from langchain_anthropic import ChatAnthropic
 
-    client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
-    extra = {"output_config": {"effort": effort}} if effort else {}
+    options = {"api_key": api_key} if api_key else {}
+    if effort:
+        options["output_config"] = {"effort": effort}
+    chat = ChatAnthropic(model=model, max_tokens=max_tokens, max_retries=2, **options)
 
     def complete(system: str, user: str) -> str:
         try:
-            response = client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                system=system,
-                messages=[{"role": "user", "content": user}],
-                **extra,
-            )
+            reply = chat.invoke([SystemMessage(system), HumanMessage(user)])
+        # LangChain re-raises the SDK's errors as subclasses of them.
         except anthropic.AuthenticationError as e:
             raise ProviderSetupError("Authentication failed. Check the API key.") from e
         except anthropic.NotFoundError as e:
             raise ProviderSetupError(f"Unknown Claude model {model!r}.") from e
         except anthropic.APIError as e:
             raise ProviderError(str(e)) from e
-        if meter:
-            meter.add(response.usage.input_tokens, response.usage.output_tokens)
-        if response.stop_reason == "refusal":
+        except TypeError as e:  # no API key anywhere
+            raise ProviderSetupError(str(e)) from e
+        if meter and reply.usage_metadata:
+            meter.add(reply.usage_metadata["input_tokens"], reply.usage_metadata["output_tokens"])
+        stop = reply.response_metadata.get("stop_reason")
+        if stop == "refusal":
             raise ProviderError("The model declined to answer this request.")
-        if response.stop_reason == "max_tokens":
+        if stop == "max_tokens":
             raise ProviderError(f"The reply hit the {max_tokens}-token limit and was cut off.")
-        return "".join(b.text for b in response.content if b.type == "text")
+        return reply.text
 
     return complete
 
@@ -121,58 +122,33 @@ def make_ollama_completer(
     The host comes from `host`, else the OLLAMA_HOST environment variable
     (Ollama's own convention), else http://localhost:11434.
     """
+    import httpx
+    import ollama
+    from langchain_ollama import ChatOllama
+
     base = _normalize_ollama_host(host)
-    # An empty ProxyHandler makes requests go straight to the server instead of
-    # through any system proxy, which would break localhost on managed machines.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    chat = ChatOllama(
+        model=model, base_url=base, num_ctx=OLLAMA_NUM_CTX, num_predict=max_tokens, temperature=0.2,
+        # trust_env=False sends requests straight to the server instead of through
+        # any system proxy, which would break localhost on managed machines.
+        sync_client_kwargs={"timeout": timeout, "trust_env": False},
+    )
 
     def complete(system: str, user: str) -> str:
-        body = json.dumps(
-            {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "stream": False,
-                "options": {
-                    "num_ctx": OLLAMA_NUM_CTX,
-                    "num_predict": max_tokens,
-                    "temperature": 0.2,
-                },
-            }
-        ).encode("utf-8")
-        request = urllib.request.Request(
-            f"{base}/api/chat", data=body, headers={"Content-Type": "application/json"}
-        )
         try:
-            with opener.open(request, timeout=timeout) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            detail = ""
-            try:
-                detail = json.loads(e.read().decode("utf-8")).get("error", "")
-            except Exception:
-                pass
-            if e.code == 404:
+            reply = chat.invoke([SystemMessage(system), HumanMessage(user)])
+        except ollama.ResponseError as e:
+            if e.status_code == 404:
                 raise ProviderSetupError(
                     f"Ollama has no model named {model!r}. Download it with: ollama pull {model}"
                 ) from e
-            raise ProviderError(f"Ollama returned HTTP {e.code}: {detail or e.reason}") from e
-        except TimeoutError as e:
+            raise ProviderError(f"Ollama returned HTTP {e.status_code}: {e.error}") from e
+        except httpx.TimeoutException as e:
             raise ProviderError(f"Ollama did not answer within {timeout}s") from e
-        except urllib.error.URLError as e:
-            if isinstance(e.reason, TimeoutError):
-                raise ProviderError(f"Ollama did not answer within {timeout}s") from e
-            raise ProviderSetupError(
-                f"Could not reach Ollama at {base}. Is it running? ({e.reason})"
-            ) from e
-        except (json.JSONDecodeError, UnicodeDecodeError) as e:
-            raise ProviderError("Ollama sent a reply that was not valid JSON") from e
-
-        try:
-            return payload["message"]["content"]
-        except (KeyError, TypeError) as e:
-            raise ProviderError("Ollama's reply did not have the expected shape") from e
+        except (ConnectionError, httpx.ConnectError) as e:
+            raise ProviderSetupError(f"Could not reach Ollama at {base}. Is it running? ({e})") from e
+        except ValueError as e:  # a reply that isn't valid JSON or lacks the message
+            raise ProviderError("Ollama sent a reply that could not be read") from e
+        return reply.text
 
     return complete
