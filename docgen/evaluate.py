@@ -1,34 +1,6 @@
-"""Measures how well search finds the right files, on a set of questions with known answers.
-
-An eval file is JSON:
-
-    {"repo": "..",   # relative to the eval file, or absolute, or a GitHub URL
-     "questions": [{"question": "...", "files": ["path/that/answers/it.py"],
-                    "chunks": ["path/that/answers/it.py :: def the_answer"]}]}
-
-For each question and search mode, a question is a *hit* if any of its files
-appears among the top k results (a code chunk of the file, or the file's hub
-summary). Two numbers come out per mode:
-
-- hit rate @k: the share of questions with a hit. The headline number.
-- MRR (mean reciprocal rank): 1/rank of the first right result, averaged, so
-  finding it at rank 1 beats finding it at rank 5.
-
-"files" is lenient: any chunk of a long file counts, even one about something
-else. "chunks" is the strict version: each entry is a path and a piece of
-text, and only a code chunk of that path containing the text counts. Text
-rather than line numbers or names, so labels survive edits that move code
-around, and work for chunks that have no name (module code, line windows).
-Questions with chunk labels get a second pair of numbers, chunk hit rate and
-chunk MRR.
-
-Change one thing (chunk size, the embedding model, how results are fused),
-run this again, and compare. Without numbers like these, a retrieval change
-is a guess.
-
-With --rerank, one more mode runs, "rerank": hybrid search's top
-rerank.CANDIDATES hits reordered by the cross-encoder (docgen.rerank), then
-cut to k. It shows what the reranker adds on top of hybrid search.
+"""Measures search on questions with known answers: hit rate and MRR for the right
+file, and for the right chunk when a question has "path :: text" chunk labels.
+See docs/evaluation.md.
 
 Run: python -m docgen.evaluate evals/docgen.json [--k 5] [--mode hybrid] [--rerank]
 """

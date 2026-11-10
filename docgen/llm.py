@@ -1,12 +1,7 @@
-"""Model providers: Claude (Anthropic API) and a local Ollama server.
-
-Every model call in docgen goes through a plain `complete(system, user) -> str`
-callable, so the hub and Ask can be tested with fakes and don't care which
-provider is behind it. Behind it is a LangChain chat model (ChatAnthropic or
-ChatOllama), which handles each API, so LangSmith traces model calls too. The errors are split by what the caller should do:
-ProviderSetupError (bad key, unknown model, Ollama not running) means stop,
-since every later call would fail the same way; ProviderError means this one
-call failed; GenerationError means the reply came back but wasn't usable.
+"""Model providers behind one `complete(system, user) -> str` callable:
+ChatAnthropic or ChatOllama. The errors say what to do: ProviderSetupError
+means stop (bad key, unknown model, Ollama not running), ProviderError means
+this call failed, and GenerationError means the reply came back unusable.
 """
 
 from __future__ import annotations

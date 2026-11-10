@@ -1,31 +1,8 @@
-"""Agentic Ask: the same retrieve-then-answer pipeline as docgen.ask, as a
-LangGraph graph that can check its own work and try again.
-
-    retrieve ──▶ good enough? ──yes──▶ generate ──▶ citations ok? ──yes──▶ END
-       ▲              │ no                 ▲   ▲           │ no (once)
-       └── rewrite ◀──┘ (at most           │   └───────────┘
-              │          MAX_REWRITES)     │
-              └── no new terms ────────────┘
-
-- retrieve: hybrid search, then the reranker (docgen.rerank) puts the
-  candidates in order; the best rerank score says how relevant the best
-  source is. No LLM call is spent grading: the reranker is the grader.
-- rewrite: if even the best source scores under RELEVANT_SCORE, a model
-  looks at the repo's file paths and guesses the names the code likely uses
-  (the way a developer would grep), and retrieve searches for the question
-  plus those terms. Each rewrite is told what earlier searches tried and
-  found. After MAX_REWRITES tries, the answer is written from the best set
-  of sources found.
-- generate: the same prompt as Quick mode (docgen.ask.build_prompt).
-- check: an answer that cites nothing, or cites a source that doesn't
-  exist, gets one more try, told what was wrong.
-
-Quick mode (docgen.ask.ask) is one pass straight through and stays the
-default; this costs at least one more model call when retrieval is weak.
-
-Every run's steps are returned with the answer, and if LangSmith tracing is
-on (LANGSMITH_TRACING=true and LANGSMITH_API_KEY), LangGraph sends each
-node's inputs and outputs there too.
+"""Agentic Ask: docgen.ask as a LangGraph graph that checks its own work. It
+reranks the sources, rewrites the search when even the best one scores under
+RELEVANT_SCORE (up to MAX_REWRITES times), and retries an answer that cites
+nothing or a source that doesn't exist. The decisions are rules, not model
+calls.
 """
 
 from __future__ import annotations
@@ -42,13 +19,12 @@ from docgen.ask import CONTEXT_CHARS, DEFAULT_K, Answer, build_prompt, parse_ans
 from docgen.hub import model_cost
 from docgen.llm import Completer, UsageMeter
 from docgen.rerank import CANDIDATES, rerank
-from docgen.search import SearchHit, search
+from docgen.search import SearchHit, is_overview_question, overview_first, search
 from docgen.walker import walk_repo
 
 MAX_REWRITES = 2
-# A best rerank score below this means "probably not about the question". Set
-# from the docgen eval set: every question there has an answer in the repo,
-# and -2.0 sends 4 of 52 (8%) through a rewrite they didn't need.
+# A best rerank score below this means "probably not about the question"
+# (set on the docgen eval set; see docs/evaluation.md).
 RELEVANT_SCORE = -2.0
 
 REWRITE_SYSTEM = """You help search a code repository. Searching for a developer's question found nothing \
@@ -89,7 +65,8 @@ class AgentState(TypedDict, total=False):
     question: str
     query: str  # what the next retrieve searches for
     stuck: bool  # the last rewrite had no new terms, so searching again is pointless
-    tried: list[str]  # every query searched so far
+    overview: bool  # a question about the whole repo, answered from its overview material
+    tried: list[str]
     hits: list[SearchHit]  # the sources from the latest search, best first
     best_hits: list[SearchHit]  # the best-scoring set of sources so far
     answer: Answer
@@ -108,14 +85,23 @@ def build_graph(repo: Path, complete: Completer, k: int = DEFAULT_K, budget: int
     def retrieve(state: AgentState) -> AgentState:
         query = state["query"]
         found = rerank(state["question"], search(repo, query, k=CANDIDATES), scorer)
+        overview = is_overview_question(state["question"])
+        if overview:
+            # Overview material can't score well against "give me an overview":
+            # it goes first, and the score check is skipped.
+            found = overview_first(repo, found, k)
         hits = pick_sources(found, k)
         best_hits = state.get("best_hits") or []
-        if _best(hits) > _best(best_hits):
+        if overview or _best(hits) > _best(best_hits):
             best_hits = hits
+        step = (f"retrieve, a question about the whole repo: {len(hits)} sources, README and hub summaries first"
+                if overview else f"retrieve {query!r}: {len(hits)} sources, best score {_best(hits):.2f}")
         return {"hits": hits, "best_hits": best_hits, "tried": [*state.get("tried", []), query],
-                "steps": [f"retrieve {query!r}: {len(hits)} sources, best score {_best(hits):.2f}"]}
+                "overview": overview, "steps": [step]}
 
     def after_retrieve(state: AgentState) -> str:
+        if state.get("overview") and state["hits"]:
+            return "generate"
         if not state["hits"]:
             return "give_up" if len(state["tried"]) > MAX_REWRITES else "rewrite"
         if _best(state["hits"]) >= relevant_score or len(state["tried"]) > MAX_REWRITES:

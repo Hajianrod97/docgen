@@ -1,23 +1,6 @@
-"""Reranking: a cross-encoder rescores search hits against the question.
-
-Search compares the question with each chunk separately: the chunk's vector
-was made long before the question was asked, and BM25 only counts shared
-words. A cross-encoder reads the question and one chunk *together* and
-scores how well that chunk answers it, which is much more accurate but far
-too slow to run over a whole repo. So the two are chained: hybrid search
-narrows thousands of chunks to a few dozen candidates, and the reranker
-puts those in order.
-
-The default model is ms-marco-MiniLM-L-12-v2, run locally by fastembed (ONNX
-Runtime, no PyTorch; about 120 MB, downloaded on first use). Of four tried
-on the docgen eval set it was the only one that helped (top-5 file hit 94%
-to 100%, MRR 0.68 to 0.75); bge-reranker-base and jina-reranker-v1-turbo
-made ranking worse. On the held-out gitsummarize set it was about even
-(chunk hit 79% to 83%, file MRR 0.78 to 0.74), so Quick mode doesn't use
-it; the agent does, mostly for its score. That score is a raw relevance
-logit: higher is better, and its scale depends on the model.
-DOCGEN_RERANKER picks another fastembed reranker, or "hash" for an offline
-stand-in used by tests (it counts shared words, so it means little).
+"""Reranking: a cross-encoder scores each search hit against the question, reading
+both together. The model is ms-marco-MiniLM-L-12-v2 via fastembed
+(DOCGEN_RERANKER to change it; see docs/evaluation.md for how it was chosen).
 """
 
 from __future__ import annotations

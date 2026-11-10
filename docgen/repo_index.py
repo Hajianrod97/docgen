@@ -1,20 +1,7 @@
-"""Builds the search index behind "Ask the repo": every file's chunks, plus the hub's summaries.
-
-Each entry is a piece of text, its metadata and its embedding vector, stored
-as a row of the repo's table in Postgres (see docgen.store). Each entry has a
-`type` in its metadata:
-
-- "code": a chunk of a file, from docgen.chunking. Its metadata has the path
-  and line range, which is what answers cite as `file:line`.
-- "summary": a piece of a hub summary (a file, a folder or the overview),
-  split at its headings. Summaries answer "what is this for" questions well,
-  since they say in plain words what the code only implies.
-
-Updates are incremental. The repo's manifest (in Postgres, next to its table)
-records each file's content hash and the ids of its chunks; a run re-chunks and re-embeds only
-files whose hash changed, deletes the chunks of removed files, and does the
-same for summaries. Changing the chunking rules or the embedding model
-rebuilds everything, since vectors from different models can't be mixed.
+"""Keeps a repo's search index in step with the repo: every file's chunks plus the
+hub's summaries, stored through docgen.store. Only files and summaries whose
+content hash changed are re-embedded; changing the chunking rules or the
+embedding model rebuilds everything.
 """
 
 from __future__ import annotations

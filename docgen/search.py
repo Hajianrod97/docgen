@@ -1,36 +1,12 @@
-"""Hybrid search over the repo index: vector search and BM25 keyword search, fused.
-
-The two halves fail differently, which is why both are used:
-
-- Vector search (pgvector: cosine distance to the question's embedding,
-  all-MiniLM-L6-v2 by default) matches meaning, so
-  "how are repos downloaded" can find code that says `git clone`. It is weak
-  on exact names: a question about "the cost estimate" may not find a method
-  called `estimate`.
-- BM25 matches words, weighted so rare words count more than common ones and
-  a word repeated in a long chunk counts less than in a short one. It finds
-  `estimate` at once but knows nothing about synonyms. The scoring is
-  ParadeDB pg_search's; the words it scores come from docgen's `tokenize`,
-  which splits identifiers.
-
-Their rankings are merged with reciprocal rank fusion (RRF): each result
-scores 1 / (RRF_K + rank) in every list it appears in, and the scores are
-added. RRF only looks at ranks, so it needs no tuning to make cosine
-similarities and BM25 scores comparable, which they aren't.
-
-Plain RRF trusts both lists equally, so a result only one search found loses
-to results both found further down. `alpha` weights the vector list against
-the keyword list: 0.5 is plain RRF, 1.0 is vector only, 0.0 keyword only.
-
-Both halves are SQL queries against the repo's table (docgen.store.ranked).
-
-`RepoRetriever` offers the same search as a LangChain retriever, for code
-built on LangChain (such as a LangGraph agent).
+"""Hybrid search: vector search (meaning) and BM25 (exact words), both run in
+Postgres by docgen.store, fused with weighted reciprocal rank fusion.
+RepoRetriever offers the same search as a LangChain retriever.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -105,23 +81,52 @@ def search(repo_path: str | Path, query: str, k: int = 8, mode: str = "hybrid",
     keyword_rank = {doc_id: n for n, doc_id in enumerate(keyword, 1)}
     best = sorted(fused, key=lambda i: (-fused[i], i))[:k]
 
-    hits = []
-    for doc_id in best:
-        meta, document = entries[doc_id]
-        is_code = meta["type"] == "code"
-        hits.append(SearchHit(
-            id=doc_id,
-            type=meta["type"],
-            path=meta["path"],
-            start_line=meta["start_line"] if is_code else None,
-            end_line=meta["end_line"] if is_code else None,
-            label=meta.get("symbol", "") if is_code else (meta.get("section") or meta.get("level", "")),
-            text=_strip_header(document),
-            score=round(fused[doc_id], 5),
-            vector_rank=vector_rank.get(doc_id),
-            keyword_rank=keyword_rank.get(doc_id),
-        ))
-    return hits
+    return [_hit(doc_id, *entries[doc_id], round(fused[doc_id], 5), vector_rank.get(doc_id), keyword_rank.get(doc_id))
+            for doc_id in best]
+
+
+def _hit(doc_id: str, meta: dict, document: str, score: float,
+         vector_rank: int | None = None, keyword_rank: int | None = None) -> SearchHit:
+    is_code = meta["type"] == "code"
+    return SearchHit(
+        id=doc_id,
+        type=meta["type"],
+        path=meta["path"],
+        start_line=meta["start_line"] if is_code else None,
+        end_line=meta["end_line"] if is_code else None,
+        label=meta.get("symbol", "") if is_code else (meta.get("section") or meta.get("level", "")),
+        text=_strip_header(document),
+        score=score,
+        vector_rank=vector_rank,
+        keyword_rank=keyword_rank,
+    )
+
+
+# Questions about the whole repo. No chunk answers "give me an overview", so
+# search alone returns whatever shares a word with it; the README and the hub's
+# overview are what can. The repo word keeps "how is the overview diagram
+# checked?" an ordinary search.
+_REPO = r"(?:repo|repository|project|codebase|code base|library|app|tool)"
+_OVERVIEW_QUESTION = re.compile(
+    rf"\b(?:overview|summary|summari[sz]e|architecture|big picture|high[- ]level|walkthrough|tour)\b.*\b{_REPO}\b"
+    rf"|\bwhat (?:is|does) (?:this|the) {_REPO}\b"
+    rf"|\b(?:about|explain|describe) (?:this|the) {_REPO}\b",
+    re.I)
+
+
+def is_overview_question(question: str) -> bool:
+    return bool(_OVERVIEW_QUESTION.search(question))
+
+
+def overview_first(repo_path: str | Path, hits: list[SearchHit], k: int) -> list[SearchHit]:
+    """For a question about the whole repo: its overview material first (see
+    store.overview_rows), then the search hits not already among it."""
+    # More rows than k: Ask keeps at most a few summaries, and README sections
+    # should fill the rest rather than search hits.
+    first = [_hit(doc_id, meta, text, 0.0) for doc_id, meta, text in
+             store.overview_rows(Path(repo_path).resolve(), 3 * k)]
+    seen = {h.id for h in first}
+    return first + [h for h in hits if h.id not in seen]
 
 
 class RepoRetriever(BaseRetriever):

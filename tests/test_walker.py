@@ -78,6 +78,7 @@ def test_generated_files_are_reported(tmp_path):
     write(tmp_path, "custom.lock")
     write(tmp_path, "vendor.min.js")
     write(tmp_path, "app.js.map")
+    write(tmp_path, "logo.svg", '<svg xmlns="http://www.w3.org/2000/svg"></svg>')
     write(tmp_path, "app.js")
     assert paths(tmp_path) == ["app.js"]
     assert skipped(tmp_path) == {
@@ -86,6 +87,7 @@ def test_generated_files_are_reported(tmp_path):
         "custom.lock": "lockfile",
         "vendor.min.js": "minified",
         "app.js.map": "source map",
+        "logo.svg": "image",
     }
 
 

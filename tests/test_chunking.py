@@ -129,6 +129,14 @@ def test_markdown_splits_at_headings_with_their_path():
     assert covered(chunks) >= nonblank(MD)
 
 
+def test_markdown_html_headings_count_as_headings():
+    md = ('<p align="center"><img src="logo.svg"></p>\n'
+          '<h1 align="center">Fresh <em>context</em> &amp; more</h1>\n\nIntro text.\n\n'
+          '<h2 align="center">Why <em>incremental?</em></h2>\n\nOnly the delta.\n')
+    chunks = chunk_file("README.md", "markdown", md)
+    assert [c.symbol for c in chunks] == ["", "Fresh context & more", "Fresh context & more > Why incremental?"]
+
+
 def test_files_without_a_parser_use_overlapping_windows():
     text = "".join(f"setting_{i} = {i}\n" for i in range(150))
     chunks = chunk_file("big.cfg", "text", text)

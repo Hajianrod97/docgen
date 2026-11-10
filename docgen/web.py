@@ -1,13 +1,8 @@
-"""Local web UI for docgen.
+"""Local web UI: a thin FastAPI layer of JSON endpoints over the hub, the search
+index, search and Ask, plus a static page. Listens on 127.0.0.1 unless
+DOCGEN_WEB_HOST says otherwise.
 
-A thin FastAPI layer over the pipeline (the hub, the search index, search and
-Ask) - it adds no logic of its own, only JSON endpoints and a static page that
-call them. The repo can be a local path or a public GitHub URL, which is
-cloned into a cache folder (see docgen/repos.py). Binds to 127.0.0.1 only:
-this is a local tool for one person's own machine, not a public service.
-
-Run with: python -m docgen.web
-Then open: http://127.0.0.1:8765
+Run: python -m docgen.web
 """
 
 from __future__ import annotations
@@ -176,6 +171,7 @@ class HubBuildRequest(BaseModel):
     top_model: str | None = None
     api_key: str | None = None  # anthropic only; used for this build only, never stored
     regenerate: bool = False
+    paths: list[str] | None = None  # just these files (no folders or overview), even if cached
 
 
 @app.post("/api/hub/build")
@@ -186,6 +182,10 @@ def hub_build(req: HubBuildRequest):
     file_model, top_model = _models_or_400(req.provider, req.file_model, req.top_model)
     models = make_hub_models(req.provider, file_model, top_model, api_key=req.api_key)
     plan = _hub_plan(path, regenerate=req.regenerate)
+    if req.paths is not None:
+        unknown = [p for p in req.paths if p not in plan.files]
+        if unknown or not req.paths:
+            raise HTTPException(400, f"Not files docgen reads in this repo: {', '.join(unknown) or '(none given)'}")
 
     key = str(path)
     stop = threading.Event()
@@ -207,7 +207,7 @@ def hub_build(req: HubBuildRequest):
     def run() -> None:
         try:
             build_hub(path, models, plan, on_progress=on_progress,
-                      should_stop=stop.is_set, regenerate=req.regenerate)
+                      should_stop=stop.is_set, regenerate=req.regenerate, only=req.paths)
         except HubStopped:
             job["stopped"] = True
         except ProviderError as e:
@@ -347,7 +347,9 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/")
 def index_page():
-    return FileResponse(STATIC_DIR / "index.html")
+    # The whole UI is this one page: make browsers check for a newer one, so an
+    # update shows up on a plain reload instead of needing a hard refresh.
+    return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 def _open_browser(url: str) -> None:
@@ -363,11 +365,15 @@ def main():
     import uvicorn
 
     port = int(os.environ.get("DOCGEN_WEB_PORT", 8765))
+    # Only this machine can connect by default. Inside a container the server has
+    # to listen on every interface (DOCGEN_WEB_HOST=0.0.0.0) for the published port to
+    # reach it; compose.yaml publishes that port on the host's 127.0.0.1 only.
+    host = os.environ.get("DOCGEN_WEB_HOST", "127.0.0.1")
     url = f"http://127.0.0.1:{port}"
     print(f"docgen web UI running at {url} (Ctrl+C to stop)")
     if not os.environ.get("DOCGEN_NO_BROWSER"):
         Timer(1.0, _open_browser, args=(url,)).start()
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
 if __name__ == "__main__":

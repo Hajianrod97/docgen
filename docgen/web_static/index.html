@@ -326,7 +326,8 @@ async function api(method, path, body) {
   return data;
 }
 
-function esc(s) { return (s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+// Safe in text and in quoted attributes (quotes too: a path inside onclick="..." must not end it).
+function esc(s) { return (s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 // Tiny self-contained Markdown renderer for the model's own output (headings, bold,
 // inline code, fenced code blocks, bullet lists, paragraphs). No CDN dependency:
@@ -400,6 +401,7 @@ let hubData = null;
 let hubSelected = { kind: 'dir', path: '' };
 let hubPoll = null;
 let hubCited = null; // {path, start, end, text}: lines an Ask answer cited, shown on that file's page
+let fileJob = null; // {path, running, error}: a "Summarize this file" in progress or just failed, shown on that file's page
 
 function switchMain(name) {
   for (const t of ['hub', 'ask']) {
@@ -571,10 +573,21 @@ function renderPane() {
       html += `<div class="pane-purpose">${esc(desc || 'No description yet.')}</div>`
         + `<p class="hint">Small files (under 30 lines) don't get a summary of their own. Their text goes into `
         + `<a href="#" data-kind="dir" data-path="${esc(parent)}">their folder's summary</a> instead, which saves a model call per file.</p>`;
-    } else if (entry) {
-      html += `<div class="pane-purpose">${esc(entry.purpose)}</div><div class="markdown-body">${renderMarkdown(entry.summary)}</div>`;
     } else {
-      html += '<div class="empty">This file isn\'t summarized yet.</div>';
+      const mine = fileJob && fileJob.path === node.path ? fileJob : null;
+      const click = `summarizeFile(${esc(JSON.stringify(node.path))})`;
+      let action;
+      if (mine && mine.running) {
+        action = `<div class="status">Summarizing with ${esc(mine.model)}... about 10 to 60 seconds with a local model.</div>`;
+      } else {
+        action = (mine && mine.error ? `<div class="status error">${esc(mine.error)}</div>` : '')
+          + (entry ? `<p><button onclick="${click}">Summarize again</button></p>`
+            : `<p><button class="primary" onclick="${click}">Summarize this file</button>`
+              + ` <span class="hint">One model call, with the file model in the build settings. No folder or overview summaries.</span></p>`);
+      }
+      html += entry
+        ? `<div class="pane-purpose">${esc(entry.purpose)}</div><div class="markdown-body">${renderMarkdown(entry.summary)}</div>` + action
+        : '<div class="empty">This file isn\'t summarized yet.</div>' + action;
     }
   }
   $('hubPane').innerHTML = html;
@@ -629,6 +642,28 @@ async function buildHub() {
   }
 }
 
+async function summarizeFile(path) {
+  const params = hubModelParams();
+  fileJob = { path, running: true, model: params.file_model || 'the default file model' };
+  renderPane();
+  try {
+    const job = await api('POST', '/api/hub/build', Object.assign(
+      { repo: repoPath(), api_key: $('apiKey').value.trim() || null }, params, { regenerate: false, paths: [path] }));
+    renderJob(job);
+    startPolling();
+  } catch (e) {
+    fileJob = { path, running: false, error: e.message };
+    renderPane();
+  }
+}
+
+// When a "Summarize this file" job ends, keep any failure on that file's page.
+function finishFileJob(job) {
+  if (!fileJob || !fileJob.running) return;
+  const failure = job.error || (job.failures && job.failures.length ? job.failures[0].error : null);
+  fileJob = failure ? { path: fileJob.path, running: false, error: `Couldn't summarize it: ${failure}` } : null;
+}
+
 function startPolling() {
   let ticks = 0;
   clearInterval(hubPoll);
@@ -642,6 +677,7 @@ function startPolling() {
     renderJob(job);
     if (!job.running) {
       clearInterval(hubPoll); hubPoll = null;
+      finishFileJob(job);
       loadHub();
     } else if (ticks % 4 === 0) {
       loadHub(); // the tree's dots fill in as summaries finish
@@ -659,7 +695,9 @@ function renderJob(job) {
   $('hubBar').style.width = p.total ? `${Math.round(100 * p.done / p.total)}%` : '0%';
   let text;
   if (running) {
-    const current = p.item !== undefined && p.item !== null ? ` Last finished: ${p.stage} ${p.item || '(root)'}.` : '';
+    const current = p.stage === 'section'
+      ? ` Working on ${p.item}: section ${p.part} of ${p.parts} done.`
+      : p.item !== undefined && p.item !== null ? ` Last finished: ${p.stage} ${p.item || '(root)'}.` : '';
     text = `Building: ${p.done} of ${p.total} done` + (p.errors ? `, ${p.errors} failed` : '') + '.' + current;
   } else if (job.error) {
     text = `Stopped: ${job.error}`;

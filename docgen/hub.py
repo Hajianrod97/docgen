@@ -1,25 +1,8 @@
-"""Builds the documentation hub: bottom-up summaries of a whole repo.
-
-The work happens in three levels, each built from the one below:
-
-1. Files. Every file the walker returns gets a summary, with the files it
-   imports, the files that import it, and its folder neighbors as context.
-   Files too long for one prompt are split into overlapping sections; each
-   section is summarized, then the notes are merged into one file summary.
-   Tiny files (under TINY_FILE_LINES) get no call of their own: their text
-   goes straight into their directory's prompt instead.
-2. Directories, deepest first. Each gets its files' and subdirectories'
-   one-line purposes plus the text of its tiny files.
-3. The overview: the whole tree with purposes, the README, and the top-level
-   directory summaries, plus a Mermaid architecture diagram.
-
-Every summary is cached in <repo>/.docgen/hub.json under a key derived from
-what it was built from. A file's key is a hash of its text; a directory's key
-covers its children's keys, so editing one file redoes that file and the
-directories above it, and nothing else.
-
-The model calls go through the same `complete(system, user) -> str` callables
-as Ask (see docgen/llm.py), so everything here can be tested with fakes.
+"""Builds the documentation hub bottom-up: file summaries, then folders (deepest
+first), then a repo overview with a Mermaid diagram. Each summary is cached in
+<repo>/.docgen/hub.json under a hash of what it was built from, and a folder's
+key covers its children's, so an edit redoes only that file and the folders
+above it.
 """
 
 from __future__ import annotations
@@ -167,6 +150,10 @@ PROMPT_VERSION = hashlib.sha1("\0".join([
     SYSTEM_PROMPT, SECTION_TASK, FILE_TASK, FILE_BODY_INTRO, NOTES_BODY_INTRO,
     DIR_TASK, DIR_TINY_INSTRUCTIONS, OVERVIEW_TASK, DIAGRAM_FIX_TASK,
 ]).encode("utf-8")).hexdigest()[:12]
+
+
+class _Abandoned(Exception):
+    """A stop was requested partway through one summary; it's left for the next build."""
 
 
 class HubStopped(Exception):
@@ -451,6 +438,26 @@ def _tag(reply: str, name: str, required: bool = True) -> str | None:
     return None
 
 
+def _purpose_and_summary(reply: str) -> tuple[str, str]:
+    """A file or folder summary's (purpose, summary). Small local models
+    sometimes drop the tags and write the summary's Markdown on its own; its
+    "### Purpose" section has what's needed, so that's used rather than
+    throwing away a good summary over its wrapping."""
+    purpose = _tag(reply, "purpose", required=False)
+    summary = _tag(reply, "summary", required=False)
+    if summary is None and "### Purpose" in reply:
+        summary = re.sub(r"<purpose>.*?</purpose>|</?(?:purpose|summary)>", "", reply, flags=re.S).strip()
+    if purpose is None and summary:
+        section = re.search(r"### Purpose[^\n]*\n+(.+?)(?:\n\s*\n|\n#|$)", summary, re.S)
+        if section:
+            purpose = re.split(r"(?<=[.!?])\s", " ".join(section.group(1).split()), maxsplit=1)[0]
+    if not purpose:
+        raise GenerationError(f"The model's reply had no <purpose> section: {reply[:200]!r}")
+    if not summary:
+        raise GenerationError(f"The model's reply had no <summary> section: {reply[:200]!r}")
+    return purpose, summary
+
+
 def _file_context(plan: HubPlan, path: str) -> str:
     siblings = [p for p in plan.dirs[_dir_of(path)].files if p != path]
     lines = [f"Imports from this repo: {', '.join(sorted(plan.imports.get(path, ()))) or 'none found'}"]
@@ -641,6 +648,7 @@ def build_hub(
     on_progress: ProgressFn | None = None,
     should_stop: Callable[[], bool] | None = None,
     regenerate: bool = False,
+    only: list[str] | None = None,
 ) -> dict:
     """Generate every missing or out-of-date summary and return the hub data.
 
@@ -649,7 +657,8 @@ def build_hub(
     recorded under "errors" and skipped; a setup problem (bad key, unknown
     model, Ollama not running) stops the build by raising ProviderSetupError.
     Stopping via `should_stop` raises HubStopped once in-flight calls finish.
-    `regenerate` throws away every cached summary first.
+    `regenerate` throws away every cached summary first. `only` summarizes
+    just those files, cached or not, and no folders or overview.
     """
     plan = plan or plan_hub(repo_path, regenerate=regenerate)
     hub = load_hub(repo_path)
@@ -664,7 +673,15 @@ def build_hub(
 
     report = on_progress or (lambda event: None)
     estimate = plan.estimate(models.file_model, models.top_model)
-    total = len(plan.todo_files) + len(plan.todo_dirs) + int(plan.todo_overview)
+    if only is not None:
+        unknown = [p for p in only if p not in plan.files]
+        if unknown:
+            raise ValueError(f"Not files docgen reads in this repo: {', '.join(unknown)}")
+        todo_files = [p for p in only if not plan.is_tiny(p)]
+        total = len(todo_files)
+    else:
+        todo_files = plan.todo_files
+        total = len(plan.todo_files) + len(plan.todo_dirs) + int(plan.todo_overview)
     state = {"done": 0, "errors": 0}
 
     def event(stage: str, **extra) -> dict:
@@ -690,6 +707,8 @@ def build_hub(
             return
         try:
             result = work()
+        except _Abandoned:
+            return
         except ProviderSetupError:
             aborted.set()
             raise
@@ -717,13 +736,19 @@ def build_hub(
         if len(sections) > 1:
             notes = []
             for i, section in enumerate(sections, 1):
+                if stop():  # a long file is many calls: stop between them, not only between files
+                    raise _Abandoned()
                 reply = models.file_complete(*build_section_prompt(path, section, i, len(sections)))
                 notes.append(_tag(reply, "notes"))
+                report(event("section", item=path, part=i, parts=len(sections)))
+            if stop():
+                raise _Abandoned()
         reply = models.file_complete(*build_file_prompt(plan, path, notes))
+        purpose, summary = _purpose_and_summary(reply)
         return {
             "key": plan.file_keys[path],
-            "purpose": _tag(reply, "purpose"),
-            "summary": _tag(reply, "summary"),
+            "purpose": purpose,
+            "summary": summary,
             "model": models.file_model,
             "sections": len(sections),
         }
@@ -731,7 +756,10 @@ def build_hub(
     report(event("start"))
 
     # 1. Files.
-    run_all([("file", p, (lambda p=p: summarize_file(p)), hub["files"]) for p in plan.todo_files])
+    run_all([("file", p, (lambda p=p: summarize_file(p)), hub["files"]) for p in todo_files])
+    if only is not None:
+        report(event("done"))
+        return hub
 
     # 2. Directories, one depth level at a time so children are done first.
     #    Keys are recomputed from what actually succeeded: a directory built
@@ -748,6 +776,7 @@ def build_hub(
 
     def summarize_dir(d: str) -> dict:
         reply = models.top_complete(*build_dir_prompt(plan, hub, d, models.context_chars))
+        purpose, summary = _purpose_and_summary(reply)
         small = {}
         for line in (_tag(reply, "small_files", required=False) or "").splitlines():
             name, sep, desc = line.strip().strip("-* `").partition(":")
@@ -755,8 +784,8 @@ def build_hub(
                 small[name.strip(" `")] = desc.strip()
         return {
             "key": dir_keys[d],
-            "purpose": _tag(reply, "purpose"),
-            "summary": _tag(reply, "summary"),
+            "purpose": purpose,
+            "summary": summary,
             "small_files": small,
             "model": models.top_model,
         }

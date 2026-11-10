@@ -1,17 +1,6 @@
-"""Embedding function selection, set by the DOCGEN_EMBEDDINGS environment variable.
-
-- unset: all-MiniLM-L6-v2, run locally on the CPU by fastembed (downloaded on
-  first use, about 90 MB). Small and quick, but trained on English sentences,
-  and it reads only the first 256 word pieces of each chunk.
-- "hash": a small deterministic offline embedder for tests and network-
-  restricted environments. It matches on shared identifier words, not on
-  meaning, so retrieval quality is noticeably worse than a real model.
-
-Changing the choice rebuilds a repo's search index on its next update, since
-vectors from different models can't be compared.
-
-Each choice is a LangChain `Embeddings`: embed_documents for what is stored,
-embed_query for questions.
+"""The embedding model, set by DOCGEN_EMBEDDINGS: unset for all-MiniLM-L6-v2 via
+fastembed, or "hash" for an offline stand-in used by tests. Each is a LangChain
+Embeddings; changing the choice rebuilds a repo's index.
 """
 
 from __future__ import annotations
@@ -57,6 +46,9 @@ class HashingEmbedding(Embeddings):
 
 
 DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+# Texts embedded at once. fastembed's default of 256 used about 5 GB on a big
+# repo and got the Docker container killed; 32 stays under 1 GB.
+EMBED_BATCH = 32
 
 
 class MiniLMEmbedding(Embeddings):
@@ -75,7 +67,7 @@ class MiniLMEmbedding(Embeddings):
         return cls._model
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return [v.tolist() for v in self._load().embed(texts)]
+        return [v.tolist() for v in self._load().embed(texts, batch_size=EMBED_BATCH)]
 
     def embed_query(self, text: str) -> list[float]:
         return self.embed_documents([text])[0]

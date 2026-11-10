@@ -142,6 +142,16 @@ class BlockingModel(FakeModel):
         return super().__call__(system, user)
 
 
+def test_build_can_summarize_just_the_picked_files(client, repo, fake):
+    assert build(client, repo, paths=["backend/store.py"]).status_code == 200
+    job = wait_for_build(client, repo)
+    assert job["error"] is None and job["progress"]["done"] == job["progress"]["total"] == 1
+    hub = client.get("/api/hub", params={"repo": str(repo)}).json()
+    assert hub["files"]["backend/store.py"]["summary"] and not hub["overview"]
+    r = build(client, repo, paths=["no/such/file.py"])
+    assert r.status_code == 400 and "no/such/file.py" in r.json()["detail"]
+
+
 def test_one_build_per_repo_and_stop(client, repo, monkeypatch):
     model = BlockingModel()
     monkeypatch.setattr(web, "make_hub_models", lambda *a, **k: models_for(model))

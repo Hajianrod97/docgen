@@ -1,21 +1,7 @@
-"""Walks a repo and decides which files docgen reads.
-
-Every stage (the hub, the search index) gets its file list from
-here, so the skip rules live in one place:
-
-- `.gitignore` and `.docgenignore` patterns, including ones in subdirectories
-  (gitignore syntax; a deeper file overrides a shallower one, as in git).
-- A fixed set of noise directories, skipped even without a .gitignore, since a
-  downloaded or non-git folder can still contain node_modules or a venv, plus
-  docs/hub, where the hub writes its own Markdown export.
-- Lockfiles, minified bundles and source maps: large, generated, and useless
-  to summarize.
-- Symlinks (never followed, so a walk can't leave the repo), binaries, files
-  that aren't UTF-8, and files over MAX_FILE_BYTES.
-
-Ignore-rule matches are dropped quietly (a node_modules folder alone can hold
-thousands of files). Every other skip is reported with a reason so the UI can
-show what was left out.
+"""Decides which files docgen reads, for every stage: honours .gitignore and
+.docgenignore (nested, as in git) and skips noise folders, lockfiles, minified
+files, source maps, SVGs, binaries, non-UTF-8 and large files, and symlinks.
+Every skip except an ignore-rule match is reported with a reason.
 """
 
 from __future__ import annotations
@@ -102,6 +88,8 @@ def _is_generated_name(name: str) -> str | None:
         return "minified"
     if name.endswith(".map"):
         return "source map"
+    if name.lower().endswith(".svg"):  # XML, so readable as text, but a picture
+        return "image"
     return None
 
 

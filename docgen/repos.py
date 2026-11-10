@@ -1,12 +1,6 @@
-"""Turns what the user typed (a local path or a public GitHub URL) into a folder.
-
-A GitHub URL is shallow-cloned (`git clone --depth 1`) into
-~/.cache/docgen/<owner>/<repo>, or $DOCGEN_CACHE_DIR if set. Asking again with
-`fetch=True` (what Scan does) pulls the latest commit into the same folder, so
-the hub's cache in <clone>/.docgen survives and only changed files are redone.
-
-Only public github.com repos are supported: git is run with prompts turned
-off, so a private or missing repo fails fast instead of asking for a password.
+"""Turns a local path or public GitHub URL into a folder. GitHub repos are
+shallow-cloned into ~/.cache/docgen/<owner>/<repo> (or $DOCGEN_CACHE_DIR) and
+updated in place, with git prompts off so a private repo fails fast.
 """
 
 from __future__ import annotations

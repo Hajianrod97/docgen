@@ -1,27 +1,7 @@
-"""Grades docgen's answers, not just its search: LLM-as-judge evaluators from
-openevals, plus two checks that need no judge.
-
-docgen.evaluate asks "did search find the right file?". This asks what
-happens next: given those sources, is the answer any good? Each question in
-an eval file is answered (Quick mode, or Agentic with --agent), then scored:
-
-Judged by a model (openevals' RAG prompts; True or False each, with a reason):
-- groundedness: every claim in the answer is supported by the sources it
-  was given. The hallucination check.
-- helpfulness: the answer addresses the question.
-- retrieval_relevance: the sources are about the question.
-
-Checked without a judge, from the eval file's labels:
-- cites: the answer cites at least one source.
-- right_file_cited: a cited source is one of the files the question lists.
-
-The judge scores are UNCALIBRATED: nobody has yet checked how often the
-judge agrees with a person grading the same answers. A small local judge
-isn't worth running: qwen2.5-coder:7b called the sources of three correct,
-well-retrieved answers irrelevant, contradicted its own reasons, and
-sometimes returned no verdict at all. --no-judge runs only the two checks. Every answer, its
-sources and each judge's reason are saved with --out, ready to be graded by
-hand and compared.
+"""Grades docgen's answers, not just its search: two checks from the eval labels
+(does the answer cite a source, and a right file) and optional LLM-as-judge
+scores from openevals (groundedness, helpfulness, retrieval relevance). The
+judge scores are uncalibrated; see docs/evaluation.md.
 
 Run: python -m docgen.answer_eval evals/gitsummarize.json --provider ollama --no-judge [--agent] [--limit 10]
 """

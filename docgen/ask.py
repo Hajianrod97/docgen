@@ -1,17 +1,7 @@
-"""Ask the repo: answer a question from search results, with citations.
-
-This is the "generation" half of RAG. Hybrid search (docgen.search) finds the
-index entries most related to the question; they go into the prompt as
-numbered sources, and the model is told to answer only from them and to cite
-each claim with the source's number, like [2]. The numbers are then mapped
-back to `file:line` ranges, so every claim can be checked against the code.
-
-Numbered citations are easier to check than asking the model to write paths
-and line numbers itself: a number either refers to a source that was in the
-prompt or it doesn't, and any that don't are reported.
-
-Single-turn: each question is answered on its own, with no memory of earlier
-ones.
+"""Ask the repo (Quick mode): search finds sources, they go into the prompt
+numbered, and the model's [n] citations are mapped back to file:line. Numbered
+citations are easier to check than paths the model writes itself: a number
+either matches a source in the prompt or is reported.
 """
 
 from __future__ import annotations
@@ -28,7 +18,7 @@ from docgen.llm import (
     make_anthropic_completer,
     make_ollama_completer,
 )
-from docgen.search import SearchHit, search
+from docgen.search import SearchHit, is_overview_question, overview_first, search
 
 ASK_MODEL = "claude-sonnet-5-5"
 DEFAULT_K = 8
@@ -136,7 +126,10 @@ def ask(
 ) -> Answer:
     """Search the index for the question and answer it from what was found."""
     # Search deeper than k, so skipped summaries leave room for code.
-    hits = pick_sources(search(repo_path, question, k=2 * k, mode=mode), k)
+    found = search(repo_path, question, k=2 * k, mode=mode)
+    if is_overview_question(question):
+        found = overview_first(repo_path, found, k)
+    hits = pick_sources(found, k)
     if not hits:
         return Answer("The search index is empty, so there is nothing to answer from.", [], model=model)
     system, user, sources = build_prompt(question, hits, budget)

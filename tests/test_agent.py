@@ -87,6 +87,14 @@ def test_relevant_sources_go_straight_to_an_answer(repo):
     assert all(system != REWRITE_SYSTEM for system, _ in model.prompts)
 
 
+def test_overview_questions_skip_the_relevance_check(repo):
+    model = Scripted(answers=("<answer>A task app [1].</answer>",))
+    answer, steps = ask_agent(repo, "Give me an overview of this repo", model, scorer=scores(-9.0))
+    assert [s.split(" ")[0] for s in steps] == ["retrieve,", "generate:"]  # no rewrites despite the low scores
+    assert "whole repo" in steps[0]
+    assert answer.sources[0].path == "README.md"
+
+
 def test_weak_sources_get_a_rewritten_query(repo):
     model = Scripted(queries=("TaskStore add",))
     answer, steps = ask_agent(repo, "Where do the to-dos go?", model, scorer=scores(-5.0, 5.0))

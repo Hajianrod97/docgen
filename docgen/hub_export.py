@@ -1,13 +1,6 @@
-"""Writes the hub as plain Markdown: one README.md per folder.
-
-The output mirrors the repo's folders, so browsing it on GitHub works like
-browsing the code: the top README.md holds the overview, the diagram and the
-root folder; every other folder's README.md holds that folder's summary, a
-table of what's in it, and the summary of each of its files.
-
-A local repo exports to <repo>/docs/hub/ (the walker skips that folder, so the
-hub never summarizes its own output). A cloned GitHub repo exports to
-./output/<owner>-<repo>/, since the clone itself lives in a cache folder.
+"""Writes the hub as Markdown, one README.md per folder, mirroring the repo. A
+local repo exports to <repo>/docs/hub/ (which the walker skips); a cloned
+GitHub repo to ./output/<owner>-<repo>/.
 """
 
 from __future__ import annotations

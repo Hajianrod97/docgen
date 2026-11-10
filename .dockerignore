@@ -1,0 +1,12 @@
+# Only pyproject.toml, uv.lock and docgen/ go into the image.
+.git
+.github
+.venv
+.docgen
+.pytest_cache
+.ruff_cache
+**/__pycache__
+tests
+evals
+example_multilang
+output

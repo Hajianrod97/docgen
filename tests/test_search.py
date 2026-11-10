@@ -15,7 +15,7 @@ from docgen.evaluate import evaluate, load_eval, parse_chunk_label
 from docgen.evaluate import main as eval_main
 from docgen.hub import build_hub
 from docgen.repo_index import update_index
-from docgen.search import RepoRetriever, rrf, search
+from docgen.search import RepoRetriever, is_overview_question, overview_first, rrf, search
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -46,6 +46,19 @@ def test_stemming_matches_word_forms():
     assert tokenize("cloned")[0] == tokenize("clones")[0] == tokenize("cloning")[0]
     assert tokenize("is") == []  # stopword
     assert tokenize("bus") == ["bus"]  # too short to strip
+
+
+@pytest.mark.parametrize("question, overview", [
+    ("Can you give me an overview for this repo", True),
+    ("What does this project do?", True),
+    ("Explain the codebase's architecture at a high level", True),
+    ("Summarize the repository", True),
+    ("How is the overview diagram checked?", False),  # about one feature, not the repo
+    ("Where are hub summaries cached?", False),
+    ("How are repos cloned?", False),
+])
+def test_overview_questions(question, overview):
+    assert is_overview_question(question) is overview
 
 
 def test_rrf_rewards_agreement_between_rankings():
@@ -91,6 +104,16 @@ def test_type_filter_and_excluded_paths(repo):
     assert summaries[0].citation.endswith("(summary)")
     hits = search(repo, "TaskStore", k=5, exclude_paths=frozenset({"backend/store.py"}))
     assert all(h.path != "backend/store.py" for h in hits)
+
+
+def test_overview_material_comes_first(repo):
+    build_hub(repo, models_for(FakeModel()))
+    update_index(repo)
+    hits = overview_first(repo, search(repo, "TaskStore", k=5), 6)
+    assert hits[0].id.startswith("summary:overview") and hits[0].type == "summary"
+    first_code = next(h for h in hits if h.type == "code")
+    assert first_code.path == "README.md" and first_code.start_line == 1  # the README, from its top
+    assert len({h.id for h in hits}) == len(hits)  # search hits already included aren't repeated
 
 
 def test_keyword_search_sees_index_changes(repo):

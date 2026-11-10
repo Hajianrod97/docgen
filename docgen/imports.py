@@ -1,10 +1,6 @@
-"""Finds which repo files import which, using simple per-language text patterns.
-
-This is deliberately approximate: it reads import lines with regular
-expressions instead of parsing, and only resolves imports that point at files
-inside the repo (third-party packages are ignored). It covers Python and
-JavaScript/TypeScript; other languages simply get no import edges, and their
-summaries rely on folder neighbors instead.
+"""Finds which repo files import which, roughly: regular expressions over import
+lines, for Python and JavaScript/TypeScript only, keeping only imports of files
+inside the repo.
 """
 
 from __future__ import annotations

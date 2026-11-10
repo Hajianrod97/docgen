@@ -128,6 +128,22 @@ def test_estimate_counts_calls_and_prices_known_models(tmp_path):
     assert plan.estimate("claude-future-9", "claude-opus-5-5")["cost_usd"] is None
 
 
+def test_summaries_without_their_tags_are_still_used():
+    from docgen.hub import _purpose_and_summary
+
+    tagged = "<purpose>Plays music.</purpose>\n<summary>\n### Purpose\nPlays music.\n</summary>"
+    assert _purpose_and_summary(tagged) == ("Plays music.", "### Purpose\nPlays music.")
+    # A small model wrote the summary's Markdown with no tags around it.
+    bare = "### Purpose\nThe `MusicBar` component shows playback. It switches services.\n\n### Key components\n- x"
+    purpose, summary = _purpose_and_summary(bare)
+    assert purpose == "The `MusicBar` component shows playback."
+    assert summary == bare
+    # Only the summary tag missing: the purpose isn't repeated in the summary.
+    assert _purpose_and_summary("<purpose>P.</purpose>\n### Purpose\nLong text.") == ("P.", "### Purpose\nLong text.")
+    with pytest.raises(GenerationError, match="no <purpose>"):
+        _purpose_and_summary("Sure! Here's a summary of the file.")
+
+
 def test_empty_repo_is_an_error(tmp_path):
     with pytest.raises(GenerationError):
         plan_hub(tmp_path)
@@ -280,6 +296,32 @@ def test_stop_keeps_finished_work_and_resumes(repo):
     build_hub(repo, models_for(fake))
     redone = [s for k, s in fake.calls if k == "file"]
     assert len(redone) == 2 and not set(redone) & set(saved["files"])  # 4 files in all
+
+
+def test_stop_takes_effect_between_the_sections_of_a_long_file(repo):
+    write(repo, "backend/huge.py", "\n".join(f"value_{i} = '{'x' * 60}'" for i in range(800)))
+    fake, events = FakeModel(), []
+    with pytest.raises(HubStopped):
+        build_hub(repo, models_for(fake), on_progress=events.append, should_stop=lambda: len(fake.calls) >= 2)
+    assert len(fake.calls) == 2  # stopped between sections, not after the whole file
+    assert [e["part"] for e in events if e["stage"] == "section"] == [1, 2]
+    saved = load_hub(repo)
+    assert "backend/huge.py" not in saved["files"] and saved["errors"] == {}  # left for next time, not a failure
+
+
+def test_only_summarizes_the_picked_files(repo):
+    for i in range(3):
+        write(repo, f"backend/mod{i}.py", long_file(40, tag=str(i)))
+    fake, events = FakeModel(), []
+    hub = build_hub(repo, models_for(fake), only=["backend/mod1.py"], on_progress=events.append)
+    assert [k for k, _ in fake.calls] == ["file"]  # no folders, no overview
+    assert set(hub["files"]) == {"backend/mod1.py"} and hub["dirs"] == {} and not hub["overview"]
+    assert events[-1]["stage"] == "done" and events[-1]["done"] == events[-1]["total"] == 1
+    # Picking a file that's already summarized redoes it.
+    build_hub(repo, models_for(fake), only=["backend/mod1.py"])
+    assert len(fake.calls) == 2
+    with pytest.raises(ValueError, match="nope.py"):
+        build_hub(repo, models_for(fake), only=["nope.py"])
 
 
 def test_progress_events(repo):

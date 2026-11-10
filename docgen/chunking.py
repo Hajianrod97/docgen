@@ -1,48 +1,28 @@
-"""Splits repo files into chunks for the search index, with a rule per kind of file.
-
-- Python is split with `ast`: each top-level function and class is a chunk,
-  with its decorators and the comment lines right above it. A class too long
-  for one chunk is split into its methods plus the rest of its body. The code
-  between definitions (imports, constants, scripts) becomes "module" chunks,
-  so every line of the file lands in some chunk. A file that doesn't parse
-  falls back to line windows.
-- Other code (TypeScript, JavaScript, Go, Rust, Java, C#, Ruby, ...) is parsed
-  with tree-sitter, which gives a syntax tree in the same shape for every
-  language, and split the same way as Python: functions, classes, interfaces
-  and so on become chunks named after what they define, including the
-  `const Page = () => {...}` style used for React components. A definition
-  too long for one chunk is split into what it contains (a class into its
-  methods, a component into its inner handlers), and the rest of its body is
-  kept as "body" chunks. Grammars are downloaded on first use for each
-  language; if one can't be had (offline, say), the file falls back to windows.
-- Markdown is split at headings. Each chunk knows its heading path, such as
-  "Install > macOS", which says more about it than the text alone.
-- Everything else (and any file a parser can't handle) is split into windows
-  of WINDOW_LINES lines that overlap by WINDOW_OVERLAP, so something that sits
-  on a window edge still appears whole in one of them.
-
-Any chunk still longer than MAX_CHUNK_LINES is cut into windows too. One
-vector has to stand for a whole chunk, so a huge chunk ends up a blur of many
-things, and the default embedding model (all-MiniLM-L6-v2) only reads its first
-256 word pieces anyway. Chunk size is a trade-off worth experimenting with.
+"""Splits repo files into chunks for the search index: Python with ast and other
+code with tree-sitter, both at function and class boundaries; Markdown at
+headings; everything else in overlapping line windows. Chunks over
+MAX_CHUNK_LINES are windowed too, since one vector stands for a whole chunk.
 """
 
 from __future__ import annotations
 
 import ast
 import bisect
+import html
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
-CHUNKER_VERSION = "4"  # bump when the rules change, so the index is rebuilt
+CHUNKER_VERSION = "5"  # bump when the rules change, so the index is rebuilt
 
 WINDOW_LINES = 60
 WINDOW_OVERLAP = 10
 MAX_CHUNK_LINES = 120
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+# READMEs often use HTML headings, such as <h2 align="center">Why <em>this?</em></h2>.
+_HTML_HEADING = re.compile(r"^\s*<h([1-6])\b[^>]*>(.*?)</h\1>\s*$", re.I)
 _CAMEL_PART = re.compile(r"[A-Za-z][a-z0-9]*|[A-Z]+(?![a-z])|\d+")
 
 
@@ -69,7 +49,8 @@ _STOPWORDS = frozenset("""
 a an and are as at be by can do does for from has have how i if in into is it its
 of on or so that the their then there these this to was what when where which who
 why will with you your
-""".split())
+could would should me my us our please give tell show explain
+""".split())  # the last line: how people phrase a question, never what it's about
 
 
 def _stem(token: str) -> str:
@@ -444,6 +425,9 @@ def _markdown_chunks(lines: list[str]) -> list[tuple[int, int, str, str]]:
             in_code = not in_code
         elif not in_code and (m := _HEADING.match(line)):
             headings.append((n, len(m.group(1)), m.group(2)))
+        elif not in_code and (m := _HTML_HEADING.match(line)):
+            title = html.unescape(re.sub(r"<[^>]+>", "", m.group(2))).strip()
+            headings.append((n, int(m.group(1)), title))
 
     units = []
     if not headings or headings[0][0] > 1:

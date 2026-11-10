@@ -1,26 +1,7 @@
-"""The search index in Postgres: pgvector for vector search, ParadeDB's
-pg_search for BM25 keyword search.
-
-Each repo gets its own table (`table_name`), so BM25's word statistics are
-the repo's own and a repo can use an embedding model of any vector size. A
-row is one index entry:
-
-    id         text primary key   "code:docgen/hub.py:40-72"
-    text       text               what was embedded, header included
-    keywords   text               tokenize(text) joined by spaces, for BM25
-    type, path text               for filtering
-    metadata   jsonb              lines, symbol, section, ...
-    embedding  vector(<size>)     the entry's embedding
-
-`keywords` holds docgen's own tokens rather than the raw text, and the BM25
-index splits them only at spaces (pg_search's whitespace tokenizer), so
-`make_hub_models` still matches "hub models" the way it did before Postgres.
-
-`docgen_repos` holds each repo's manifest (the hash of every indexed file
-and summary). It is saved in the same transaction as the rows it describes,
-so the two can't disagree after a crash.
-
-Connects to DOCGEN_DATABASE_URL, or the local docgen-db container by default.
+"""The search index in Postgres: one table per repo (so BM25's word statistics and
+the vector size are the repo's own), with a pgvector HNSW index and a ParadeDB
+BM25 index over `keywords`, docgen's own tokens. A repo's manifest is saved in
+the same transaction as its rows. Connects to DOCGEN_DATABASE_URL.
 """
 
 from __future__ import annotations
@@ -174,6 +155,25 @@ class PostgresStore:
             for e, vector in zip(entries, vectors, strict=True)
         ]
         self.conn.cursor().executemany(statement, rows)
+
+
+def overview_rows(repo: Path, limit: int) -> list[tuple[str, dict, str]]:
+    """(id, metadata, text) of the repo's overview material, most general
+    first: the hub's overview and root-folder summaries, the README's
+    summary, then the README's sections in order."""
+    table = table_name(repo)
+    with connect() as conn:
+        if not _table_exists(conn, table):
+            raise LookupError(f"No search index for {repo}")
+        return conn.execute(sql.SQL("""SELECT id, metadata, text FROM {table}
+            WHERE (type = 'summary' AND (metadata->>'level' = 'overview'
+                                         OR (metadata->>'level' = 'dir' AND path = '')))
+               OR lower(path) IN ('readme.md', 'readme', 'readme.rst', 'readme.txt')
+            ORDER BY CASE WHEN metadata->>'level' = 'overview' THEN 0
+                          WHEN metadata->>'level' = 'dir' THEN 1
+                          WHEN type = 'summary' THEN 2 ELSE 3 END,
+                     (metadata->>'start_line')::int NULLS FIRST, id
+            LIMIT %s""").format(table=sql.Identifier(table)), (limit,)).fetchall()
 
 
 def ranked(repo: Path, query: str, mode: str, types: tuple[str, ...] | None,

@@ -1,0 +1,51 @@
+# docgen and its database: `docker compose up`, then open http://127.0.0.1:8765
+#
+# Local repos: the folder DOCGEN_REPOS (default: this folder) is mounted at
+# /repos, so scan /repos/example_multilang, or /repos for docgen itself.
+# GitHub URLs work as they are; clones are kept in the docgen-data volume.
+# Ollama runs on the host (Docker can't use a Mac's GPU), reached through
+# host.docker.internal.
+
+services:
+  db:
+    image: paradedb/paradedb:0.26.2-pg17  # Postgres 17 with pgvector and pg_search
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: docgen
+      POSTGRES_PASSWORD: docgen
+      POSTGRES_DB: docgen
+    volumes:
+      - docgen-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "docgen", "-d", "docgen"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    ports:
+      - "127.0.0.1:5432:5432"  # this machine only: for running docgen or its tests outside Docker
+
+  app:
+    build: .
+    restart: unless-stopped  # come back after a crash, such as running out of memory
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${DOCGEN_WEB_PORT:-8765}:8765"  # this machine only, as when run without Docker
+    environment:
+      DOCGEN_DATABASE_URL: postgresql://docgen:docgen@db:5432/docgen
+      DOCGEN_CACHE_DIR: /data/clones
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      # Optional, passed through only if set in your shell (or a .env file next to this one):
+      ANTHROPIC_API_KEY:  # the UI also takes a key per request
+      LANGSMITH_TRACING:
+      LANGSMITH_API_KEY:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Docker Desktop has this name already; Linux needs it
+    volumes:
+      - ${DOCGEN_REPOS:-.}:/repos
+      - docgen-data:/data
+
+volumes:
+  docgen-pg:
+  docgen-data:
