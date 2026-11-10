@@ -204,6 +204,29 @@ The UI lists the steps taken under the answer. With `LANGSMITH_TRACING=true` and
 
 The roadmap had picked bge-reranker-base; measuring showed it made ranking worse here, likely because it was trained on prose, not code. On the held-out gitsummarize set MiniLM-L-12 was about even with hybrid search (file 88% both, MRR 0.78 to 0.74, chunk hit 79% to 83%), so Quick mode doesn't rerank. The threshold of -2.0 comes from the docgen set, where every question has an answer: it sends 4 of 52 through a rewrite they didn't need.
 
+### Grading the answers
+
+Search evals check that the right file was *found*; `docgen/answer_eval.py` checks what the model then *said*. Each question is answered (Quick, or Agentic with `--agent`) and checked two ways:
+
+- **Without a judge**, from the eval file's labels: does the answer cite a source at all, and does it cite one of the files the question lists? These are objective.
+- **With a judge model** ([openevals](https://github.com/langchain-ai/openevals)' RAG prompts): is every claim grounded in the sources, is the answer helpful, are the sources relevant. Every answer, its sources and each judge's reason can be saved with `--out` for grading by hand.
+
+```bash
+python -m docgen.answer_eval evals/gitsummarize.json --provider ollama --no-judge --limit 10 [--agent]
+```
+
+First 10 gitsummarize questions, answered by qwen2.5-coder:7b:
+
+| | Quick | Agentic |
+|---|---|---|
+| answer cites a source | 50% | **100%** |
+| cites a right file | 50% | **90%** |
+| median time | 23 s | 31 s |
+
+The agent rewrote no queries here (retrieval was already good); the gain came from its citation check, which sent 5 of the 10 answers back once with "cite your sources" and fixed all 5. The uncited Quick answers were often correct, but nothing tied them to the code.
+
+**The judge isn't trusted yet.** Ragas, the usual choice, was passed over: no release since January 2026, an open security advisory, and install docs pinned to LangChain 0.3. With qwen2.5-coder:7b as the judge, openevals called the sources of three correct, well-retrieved answers irrelevant, once contradicted its own written reason, and sometimes returned no verdict at all, so `--no-judge` skips it. A stronger judge (`--judge-provider anthropic`) is the next step, and its scores should be checked against hand grades before being reported.
+
 ## Using a free local model (Ollama)
 
 You don't need an Anthropic key. [Ollama](https://ollama.com) runs open models on your own machine, free and offline after the model is downloaded.
